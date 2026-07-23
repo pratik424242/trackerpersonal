@@ -14,9 +14,10 @@ export default defineConfig(({ command }) => ({
     // Resolves the "@/*" alias declared in tsconfig.json's `paths`.
     tsConfigPaths({ projects: ["./tsconfig.json"] }),
     tanstackStart({ server: { entry: "server" } }),
-    // Only needed to produce the deployable server output; the dev server
-    // handles SSR itself via Vite middleware.
-    ...(command === "build" ? [nitro({ preset: "vercel" })] : []),
+    // `serverDir` turns on Nitro's own file-based API routes under
+    // server/api/* (e.g. the email-import webhook), separate from
+    // TanStack Router's page routes. The preset only matters at build time.
+    nitro(command === "build" ? { preset: "vercel", serverDir: true } : { serverDir: true }),
     viteReact(),
   ],
 }));
