@@ -27,12 +27,21 @@ const VPA_TO_CATEGORY: Record<string, string> = {
 // A UPI payment from your own bank account that's actually paying off one
 // of your own credit cards isn't a plain expense — it needs the app's
 // "Clear card bill" double-entry (reduces Bank *and* the card's debt
-// together). Recording it as an expense would silently understate the
-// card's debt. Since we can't safely tell "my card" from "someone else's
-// bill" apart, any payment that looks like a bill payment at all is left
-// for manual entry instead of guessed at.
+// together). Recording it as a plain expense would silently understate the
+// card's debt.
 function looksLikeCardBillPayment(note: string): boolean {
   return /card\s*bill|bill\s*pay|creditcard.*bill|\bcc\s*-?\s*pay\b|\bcc\s*-?\s*bill\b/i.test(note);
+}
+
+// The bill-payment payee text reliably names the bank being paid (e.g.
+// "ICICI Bank Credit Card Bill", "HDFC Bank Credit Card Bill") — enough to
+// resolve which of this app's credit card accounts it's for. Only exact,
+// unambiguous name matches count; anything else is left for manual entry
+// via Accounts -> Clear bill rather than guessed at.
+const CREDIT_CARD_ACCOUNT_NAMES = ["HDFC", "ICICI"];
+function detectBillPaymentCardName(note: string): string | null {
+  const matches = CREDIT_CARD_ACCOUNT_NAMES.filter((name) => new RegExp(name, "i").test(note));
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function supabaseServer() {
@@ -99,7 +108,7 @@ export async function importTransactionsFromEmail(options: ImportOptions = {}): 
     const body = extractBody(msg.payload);
     const parsed = parseBankEmail(from, body);
 
-    if (!parsed || parsed.direction !== "debit" || looksLikeCardBillPayment(parsed.note)) {
+    if (!parsed || parsed.direction !== "debit") {
       await addLabel(accessToken, id, unrecognizedLabelId);
       summary.unrecognized++;
       continue;
@@ -113,19 +122,43 @@ export async function importTransactionsFromEmail(options: ImportOptions = {}): 
       continue;
     }
 
-    const categoryName = parsed.vpa ? VPA_TO_CATEGORY[parsed.vpa.toLowerCase()] : undefined;
-    const categoryId = categoryName ? categoryIdByName.get(categoryName) : undefined;
-
     const occurredAt = new Date(Number(msg.internalDate)).toISOString();
-    const { error } = await supabase.rpc("apply_transaction", {
-      p_amount: parsed.amountRupees,
-      p_kind: "expense",
-      p_account_id: accountId,
-      p_category_id: (categoryId ?? null) as unknown as string,
-      p_linked_account_id: null as unknown as string,
-      p_note: parsed.note,
-      p_occurred_at: occurredAt,
-    });
+    let rpcArgs: Record<string, unknown>;
+
+    if (looksLikeCardBillPayment(parsed.note)) {
+      const cardName = detectBillPaymentCardName(parsed.note);
+      const cardAccountId = cardName ? accountIdByName.get(cardName) : undefined;
+      if (!cardAccountId) {
+        // Bill payment we can't confidently attribute to one of the known
+        // cards — leave it for manual entry rather than guess.
+        await addLabel(accessToken, id, unrecognizedLabelId);
+        summary.unrecognized++;
+        continue;
+      }
+      rpcArgs = {
+        p_amount: parsed.amountRupees,
+        p_kind: "card_payment",
+        p_account_id: accountId,
+        p_category_id: null as unknown as string,
+        p_linked_account_id: cardAccountId,
+        p_note: parsed.note,
+        p_occurred_at: occurredAt,
+      };
+    } else {
+      const categoryName = parsed.vpa ? VPA_TO_CATEGORY[parsed.vpa.toLowerCase()] : undefined;
+      const categoryId = categoryName ? categoryIdByName.get(categoryName) : undefined;
+      rpcArgs = {
+        p_amount: parsed.amountRupees,
+        p_kind: "expense",
+        p_account_id: accountId,
+        p_category_id: (categoryId ?? null) as unknown as string,
+        p_linked_account_id: null as unknown as string,
+        p_note: parsed.note,
+        p_occurred_at: occurredAt,
+      };
+    }
+
+    const { error } = await supabase.rpc("apply_transaction", rpcArgs);
 
     if (error) {
       console.error(`[import-emails] apply_transaction failed for message ${id}:`, error.message);
