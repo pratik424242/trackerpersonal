@@ -32,7 +32,7 @@ const VPA_TO_CATEGORY: Record<string, string> = {
 // bill" apart, any payment that looks like a bill payment at all is left
 // for manual entry instead of guessed at.
 function looksLikeCardBillPayment(note: string): boolean {
-  return /card\s*bill|bill\s*pay|creditcard.*bill/i.test(note);
+  return /card\s*bill|bill\s*pay|creditcard.*bill|\bcc\s*-?\s*pay\b|\bcc\s*-?\s*bill\b/i.test(note);
 }
 
 function supabaseServer() {
@@ -49,12 +49,22 @@ export type ImportSummary = {
   failed: number;
 };
 
+export type ImportOptions = {
+  // YYYY-MM-DD. Defaults to today (never scans history) unless
+  // EMAIL_IMPORT_START_DATE is set.
+  sinceDate?: string;
+  // Re-processes mail even if already labeled Imported/Unrecognized. Only
+  // meant for one-off manual backfills — the normal cron/webhook path
+  // always leaves this off so it never reprocesses anything.
+  ignoreExistingLabels?: boolean;
+};
+
 // Searches for unlabeled mail from known bank senders, parses each one,
 // inserts a matching expense, and labels the email so it's never
 // re-processed. Never touches history/credits — only debit alerts, since
 // crediting the wrong account automatically is a worse failure mode than
 // leaving it for manual entry.
-export async function importTransactionsFromEmail(): Promise<ImportSummary> {
+export async function importTransactionsFromEmail(options: ImportOptions = {}): Promise<ImportSummary> {
   const accessToken = await getAccessToken();
   const [importedLabelId, unrecognizedLabelId] = await Promise.all([
     ensureLabel(accessToken, IMPORTED_LABEL),
@@ -62,11 +72,12 @@ export async function importTransactionsFromEmail(): Promise<ImportSummary> {
   ]);
 
   // Never scans mail from before the feature was turned on, so a first run
-  // can't flood the ledger with years of history. Override by setting
-  // EMAIL_IMPORT_START_DATE=YYYY-MM-DD if a backfill is ever wanted.
-  const sinceDate = process.env.EMAIL_IMPORT_START_DATE || new Date().toISOString().slice(0, 10);
+  // can't flood the ledger with years of history. Override via `sinceDate`
+  // or EMAIL_IMPORT_START_DATE=YYYY-MM-DD if a backfill is ever wanted.
+  const sinceDate = options.sinceDate || process.env.EMAIL_IMPORT_START_DATE || new Date().toISOString().slice(0, 10);
   const senderQuery = SENDERS.map((s) => `from:${s}`).join(" OR ");
-  const query = `(${senderQuery}) -label:${IMPORTED_LABEL} -label:${UNRECOGNIZED_LABEL} after:${sinceDate.replace(/-/g, "/")}`;
+  const labelFilter = options.ignoreExistingLabels ? "" : ` -label:${IMPORTED_LABEL} -label:${UNRECOGNIZED_LABEL}`;
+  const query = `(${senderQuery})${labelFilter} after:${sinceDate.replace(/-/g, "/")}`;
 
   const ids = await listMessageIds(accessToken, query);
 
