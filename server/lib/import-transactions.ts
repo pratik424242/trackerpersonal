@@ -15,6 +15,15 @@ const LAST4_TO_ACCOUNT: Record<string, string> = {
   "9008": "ICICI",
 };
 
+// Recurring merchant VPAs that are reliably always the same category, so
+// those specific imports skip the "uncategorized, tap to fix" step. Keyed
+// lowercase; only exact matches apply — anything else still lands
+// uncategorized rather than guessing.
+const VPA_TO_CATEGORY: Record<string, string> = {
+  "paytm-31109533@ptybl": "Office Food",
+  "gpay-12199745072@okbizaxis": "Office Food",
+};
+
 // A UPI payment from your own bank account that's actually paying off one
 // of your own credit cards isn't a plain expense — it needs the app's
 // "Clear card bill" double-entry (reduces Bank *and* the card's debt
@@ -62,9 +71,14 @@ export async function importTransactionsFromEmail(): Promise<ImportSummary> {
   const ids = await listMessageIds(accessToken, query);
 
   const supabase = supabaseServer();
-  const { data: accounts, error: accErr } = await supabase.from("accounts").select("id,name");
+  const [{ data: accounts, error: accErr }, { data: categories, error: catErr }] = await Promise.all([
+    supabase.from("accounts").select("id,name"),
+    supabase.from("categories").select("id,name"),
+  ]);
   if (accErr) throw accErr;
+  if (catErr) throw catErr;
   const accountIdByName = new Map((accounts ?? []).map((a) => [a.name, a.id as string]));
+  const categoryIdByName = new Map((categories ?? []).map((c) => [c.name, c.id as string]));
 
   const summary: ImportSummary = { checked: ids.length, imported: 0, unrecognized: 0, failed: 0 };
 
@@ -88,12 +102,15 @@ export async function importTransactionsFromEmail(): Promise<ImportSummary> {
       continue;
     }
 
+    const categoryName = parsed.vpa ? VPA_TO_CATEGORY[parsed.vpa.toLowerCase()] : undefined;
+    const categoryId = categoryName ? categoryIdByName.get(categoryName) : undefined;
+
     const occurredAt = new Date(Number(msg.internalDate)).toISOString();
     const { error } = await supabase.rpc("apply_transaction", {
       p_amount: parsed.amountRupees,
       p_kind: "expense",
       p_account_id: accountId,
-      p_category_id: null as unknown as string,
+      p_category_id: (categoryId ?? null) as unknown as string,
       p_linked_account_id: null as unknown as string,
       p_note: parsed.note,
       p_occurred_at: occurredAt,

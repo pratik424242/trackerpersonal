@@ -8,6 +8,10 @@ export type ParsedTxn = {
   direction: "debit" | "credit";
   last4: string;
   note: string;
+  // The raw payee VPA, when one was identifiable — used for merchant ->
+  // category auto-mapping. Not always the same as `note`, which may add a
+  // payee name or get reworded per bank.
+  vpa?: string;
 };
 
 function toAmount(raw: string): number {
@@ -27,11 +31,13 @@ export function parseHdfc(text: string): ParsedTxn | null {
   );
   if (m) {
     const paidTo = text.match(/Paid\s+to\s+(.+?)(?=\s*(?:\n|Date\s*:|UPI\s+Transaction|$))/i);
+    const vpa = paidTo ? paidTo[1].trim() : undefined;
     return {
       amountRupees: toAmount(m[1]),
       direction: toDirection(m[2]),
       last4: m[3],
-      note: paidTo ? paidTo[1].trim() : "",
+      note: vpa ?? "",
+      vpa,
     };
   }
 
@@ -49,6 +55,7 @@ export function parseHdfc(text: string): ParsedTxn | null {
       direction: toDirection(m[2]),
       last4: m[3],
       note: name ? `${name} (${vpa})` : vpa,
+      vpa,
     };
   }
 
