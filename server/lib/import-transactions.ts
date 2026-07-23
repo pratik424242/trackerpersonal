@@ -15,6 +15,17 @@ const LAST4_TO_ACCOUNT: Record<string, string> = {
   "9008": "ICICI",
 };
 
+// A UPI payment from your own bank account that's actually paying off one
+// of your own credit cards isn't a plain expense — it needs the app's
+// "Clear card bill" double-entry (reduces Bank *and* the card's debt
+// together). Recording it as an expense would silently understate the
+// card's debt. Since we can't safely tell "my card" from "someone else's
+// bill" apart, any payment that looks like a bill payment at all is left
+// for manual entry instead of guessed at.
+function looksLikeCardBillPayment(note: string): boolean {
+  return /card\s*bill|bill\s*pay|creditcard.*bill/i.test(note);
+}
+
 function supabaseServer() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_PUBLISHABLE_KEY;
@@ -63,7 +74,7 @@ export async function importTransactionsFromEmail(): Promise<ImportSummary> {
     const body = extractBody(msg.payload);
     const parsed = parseBankEmail(from, body);
 
-    if (!parsed || parsed.direction !== "debit") {
+    if (!parsed || parsed.direction !== "debit" || looksLikeCardBillPayment(parsed.note)) {
       await addLabel(accessToken, id, unrecognizedLabelId);
       summary.unrecognized++;
       continue;
