@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, Inbox } from "lucide-react";
 import { toast } from "sonner";
 import {
   categoriesQuery,
@@ -178,7 +178,10 @@ function InsightsPage() {
       <section>
         <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-4">By category</h2>
         {rows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No spending this month yet.</p>
+          <div className="py-6 flex flex-col items-center gap-2 text-center text-sm text-muted-foreground">
+            <Inbox className="size-5 text-muted-foreground/50" aria-hidden="true" />
+            No spending this month yet.
+          </div>
         ) : (
           <ul className="space-y-4">
             {rows.map((r) => (

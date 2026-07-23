@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, Pencil, Plus, StickyNote, Trash2, X } from "lucide-react";
+import { CalendarDays, Inbox, Pencil, Plus, StickyNote, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import {
   accountsQuery,
@@ -379,12 +379,13 @@ function Journal() {
             const catName = t.category_id ? catsById[t.category_id] : null;
             const isCredit = t.kind === "salary";
             const isExpense = t.kind === "expense";
+            const isUncategorized = isExpense && !t.category_id;
             const label =
               t.kind === "salary"
                 ? "Salary"
                 : t.kind === "card_payment"
                 ? `Payment → ${t.linked_account_id ? accountsById[t.linked_account_id]?.name : "Card"}`
-                : catName ?? "Expense";
+                : catName ?? "Uncategorized";
             return (
               <li
                 key={t.id}
@@ -394,7 +395,12 @@ function Journal() {
                 } ${freshIds.has(t.id) ? "animate-ledger-in" : ""}`}
               >
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium truncate">{label}</div>
+                  <div className="flex items-center gap-1.5 text-sm font-medium truncate">
+                    {isUncategorized && (
+                      <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
+                    )}
+                    <span className={`truncate ${isUncategorized ? "text-muted-foreground" : ""}`}>{label}</span>
+                  </div>
                   <div className="text-xs text-muted-foreground truncate">
                     {acc?.name}
                     {t.note ? ` · ${t.note}` : ""} · {new Date(t.occurred_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
@@ -408,7 +414,7 @@ function Journal() {
                     e.stopPropagation();
                     handleDelete(t);
                   }}
-                  className="shrink-0 p-1.5 -mr-1.5 opacity-60 md:opacity-0 md:group-hover:opacity-100 text-muted-foreground hover:text-destructive transition-opacity"
+                  className="shrink-0 p-2.5 -mr-2.5 opacity-60 md:opacity-0 md:group-hover:opacity-100 text-muted-foreground hover:text-destructive transition-opacity"
                   aria-label="Delete"
                 >
                   <Trash2 className="size-4" />
@@ -418,7 +424,8 @@ function Journal() {
           })}
 
           {filteredTxns.length === 0 && (
-            <li className="py-10 text-center text-sm text-muted-foreground">
+            <li className="py-14 flex flex-col items-center gap-2 text-center text-sm text-muted-foreground">
+              <Inbox className="size-5 text-muted-foreground/50" aria-hidden="true" />
               {transactions.length === 0 ? "No entries yet." : "No entries for this account."}
             </li>
           )}
