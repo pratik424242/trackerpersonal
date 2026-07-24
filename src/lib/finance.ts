@@ -166,19 +166,28 @@ export async function restoreTransaction(t: Transaction) {
   });
 }
 
-// Edits an expense in place: reverses the original's balance effect, then
-// re-applies the new values. Not atomic (two RPC calls), which is an
-// acceptable tradeoff for a single-user app with no concurrent writers.
-export async function editExpense(
+// Edits a transaction in place: reverses the original's balance effect,
+// then re-applies the new values under the same kind. Not atomic (two RPC
+// calls), which is an acceptable tradeoff for a single-user app with no
+// concurrent writers.
+export async function editTransaction(
   original: Transaction,
-  updates: { amount: number; category_id: string | null; account_id: string; note: string | null; occurred_at: string },
+  updates: {
+    amount: number;
+    category_id: string | null;
+    account_id: string;
+    linked_account_id: string | null;
+    note: string | null;
+    occurred_at: string;
+  },
 ) {
   await deleteTransaction(original.id);
   await applyTransaction({
     amount: updates.amount,
-    kind: "expense",
+    kind: original.kind,
     account_id: updates.account_id,
     category_id: updates.category_id,
+    linked_account_id: updates.linked_account_id,
     note: updates.note,
     occurred_at: updates.occurred_at,
   });

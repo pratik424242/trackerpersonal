@@ -11,7 +11,7 @@ import {
   dateInputToISO,
   deleteCategory,
   deleteTransaction,
-  editExpense,
+  editTransaction,
   formatINR,
   isoToDateInput,
   restoreTransaction,
@@ -131,8 +131,15 @@ function Journal() {
   }
 
   const editMut = useMutation({
-    mutationFn: (args: { original: Transaction; amount: number; category_id: string | null; account_id: string; note: string | null; occurred_at: string }) =>
-      editExpense(args.original, args),
+    mutationFn: (args: {
+      original: Transaction;
+      amount: number;
+      category_id: string | null;
+      account_id: string;
+      linked_account_id: string | null;
+      note: string | null;
+      occurred_at: string;
+    }) => editTransaction(args.original, args),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["transactions"] });
       qc.invalidateQueries({ queryKey: ["accounts"] });
@@ -389,10 +396,10 @@ function Journal() {
             return (
               <li
                 key={t.id}
-                onClick={() => isExpense && setEditingTxn(t)}
-                className={`group flex items-center gap-4 py-3 -mx-2 px-2 rounded-md transition-all ${
-                  isExpense ? "cursor-pointer hover:bg-muted/40" : ""
-                } ${freshIds.has(t.id) ? "animate-ledger-in" : ""}`}
+                onClick={() => setEditingTxn(t)}
+                className={`group flex items-center gap-4 py-3 -mx-2 px-2 rounded-md cursor-pointer hover:bg-muted/40 transition-all ${
+                  freshIds.has(t.id) ? "animate-ledger-in" : ""
+                }`}
               >
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-1.5 text-sm font-medium truncate">
@@ -460,28 +467,46 @@ function EditTransactionModal({
   accounts: Account[];
   categories: { id: string; name: string }[];
   onClose: () => void;
-  onSave: (updates: { amount: number; category_id: string | null; account_id: string; note: string | null; occurred_at: string }) => void;
+  onSave: (updates: {
+    amount: number;
+    category_id: string | null;
+    account_id: string;
+    linked_account_id: string | null;
+    note: string | null;
+    occurred_at: string;
+  }) => void;
   onDelete: () => void;
   saving: boolean;
 }) {
+  const isCardPayment = txn.kind === "card_payment";
+  // Salary/card-payment can only source from a bank account (the RPC
+  // enforces this); expense can come from any account.
+  const sourceAccounts = txn.kind === "expense" ? accounts : accounts.filter((a) => a.kind === "bank");
+  const cardAccounts = accounts.filter((a) => a.kind === "credit_card");
+
   const [amount, setAmount] = useState(String(Number(txn.amount)));
   const [categoryId, setCategoryId] = useState(txn.category_id);
   const [accountId, setAccountId] = useState(txn.account_id);
+  const [linkedAccountId, setLinkedAccountId] = useState(txn.linked_account_id);
   const [note, setNote] = useState(txn.note ?? "");
   const [dateStr, setDateStr] = useState(isoToDateInput(txn.occurred_at));
 
   function save() {
     const n = Number(amount);
     if (!n || n <= 0) return toast.error("Enter an amount");
-    if (!categoryId) return toast.error("Pick a category");
+    if (txn.kind === "expense" && !categoryId) return toast.error("Pick a category");
+    if (isCardPayment && !linkedAccountId) return toast.error("Pick a card");
     onSave({
       amount: n,
-      category_id: categoryId,
+      category_id: isCardPayment ? null : categoryId,
       account_id: accountId,
+      linked_account_id: isCardPayment ? linkedAccountId : null,
       note: note.trim() || null,
       occurred_at: dateInputToISO(dateStr, new Date(txn.occurred_at)),
     });
   }
+
+  const title = txn.kind === "expense" ? "Edit expense" : txn.kind === "salary" ? "Edit income" : "Edit card payment";
 
   return (
     <div className="fixed inset-0 z-40 flex items-end md:items-center justify-center bg-background/70 backdrop-blur-sm px-0 md:px-4" onClick={onClose}>
@@ -490,7 +515,7 @@ function EditTransactionModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-4">
-          <p className="text-sm font-medium">Edit expense</p>
+          <p className="text-sm font-medium">{title}</p>
           <button onClick={onClose} aria-label="Close" className="text-muted-foreground hover:text-foreground">
             <X className="size-4" />
           </button>
@@ -508,18 +533,31 @@ function EditTransactionModal({
           />
         </div>
 
-        <div className="-mx-1 overflow-x-auto scrollbar-none mb-3">
-          <div className="flex gap-2 px-1 pb-1">
-            {categories.map((c) => (
-              <Chip key={c.id} active={categoryId === c.id} onClick={() => setCategoryId(c.id)}>
-                {c.name}
-              </Chip>
-            ))}
+        {isCardPayment ? (
+          <div className="mb-1">
+            <p className="text-xs text-muted-foreground mb-2">Paying which card?</p>
+            <div className="flex flex-wrap gap-2 mb-4">
+              {cardAccounts.map((a) => (
+                <Chip key={a.id} active={linkedAccountId === a.id} onClick={() => setLinkedAccountId(a.id)}>
+                  {a.name}
+                </Chip>
+              ))}
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="-mx-1 overflow-x-auto scrollbar-none mb-3">
+            <div className="flex gap-2 px-1 pb-1">
+              {categories.map((c) => (
+                <Chip key={c.id} active={categoryId === c.id} onClick={() => setCategoryId(c.id)}>
+                  {c.name}
+                </Chip>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="flex flex-wrap gap-2 mb-4">
-          {accounts.map((a) => (
+          {sourceAccounts.map((a) => (
             <Chip key={a.id} active={accountId === a.id} onClick={() => setAccountId(a.id)}>
               {a.name}
             </Chip>
