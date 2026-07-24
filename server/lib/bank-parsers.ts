@@ -59,6 +59,25 @@ export function parseHdfc(text: string): ParsedTxn | null {
     };
   }
 
+  // Bank account credit/debit (long form), e.g.
+  // "Rs.1.00 has been successfully credited to your HDFC Bank account
+  //  ending in 0702." ... "Sender: Nitya Mall (VPA: 7048908508@ybl)"
+  m = text.match(
+    /Rs\.?\s*([\d,]+\.\d{2})\s+has\s+been\s+successfully\s+(credited|debited)\s+(?:to|from)\s+your\s+[^.]*?ending\s+in\s+(\d{4})/i,
+  );
+  if (m) {
+    const sender = text.match(/Sender:\s*([^(]+?)\s*\(VPA:\s*([^)]+)\)/i);
+    const name = sender ? sender[1].trim() : undefined;
+    const vpa = sender ? sender[2].trim() : undefined;
+    return {
+      amountRupees: toAmount(m[1]),
+      direction: toDirection(m[2]),
+      last4: m[3],
+      note: name && vpa ? `${name} (${vpa})` : name ?? vpa ?? "",
+      vpa,
+    };
+  }
+
   return null;
 }
 

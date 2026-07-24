@@ -24,6 +24,14 @@ const VPA_TO_CATEGORY: Record<string, string> = {
   "gpay-12199745072@okbizaxis": "Office Food",
 };
 
+// Credits (money received) can only be auto-imported as `kind: 'salary'` —
+// that's the only transaction type this schema allows to credit a bank
+// account. Tagging every credit with this category instead of leaving it
+// uncategorized keeps them visibly distinct from real salary (which stays
+// category-less) in the ledger label and in Insights, without needing a
+// schema change to add a real "income" type.
+const OTHER_INCOME_CATEGORY = "Other Income";
+
 // A UPI payment from your own bank account that's actually paying off one
 // of your own credit cards isn't a plain expense — it needs the app's
 // "Clear card bill" double-entry (reduces Bank *and* the card's debt
@@ -69,10 +77,11 @@ export type ImportOptions = {
 };
 
 // Searches for unlabeled mail from known bank senders, parses each one,
-// inserts a matching expense, and labels the email so it's never
-// re-processed. Never touches history/credits — only debit alerts, since
-// crediting the wrong account automatically is a worse failure mode than
-// leaving it for manual entry.
+// inserts a matching transaction, and labels the email so it's never
+// re-processed. Credits only auto-import when they land on the bank
+// account (the only kind that can be credited as 'salary') — a credit
+// hitting a credit card, or one this app can't map to a known account,
+// is left for manual entry rather than guessed at.
 export async function importTransactionsFromEmail(options: ImportOptions = {}): Promise<ImportSummary> {
   const accessToken = await getAccessToken();
   const [importedLabelId, unrecognizedLabelId] = await Promise.all([
@@ -92,13 +101,26 @@ export async function importTransactionsFromEmail(options: ImportOptions = {}): 
 
   const supabase = supabaseServer();
   const [{ data: accounts, error: accErr }, { data: categories, error: catErr }] = await Promise.all([
-    supabase.from("accounts").select("id,name"),
+    supabase.from("accounts").select("id,name,kind"),
     supabase.from("categories").select("id,name"),
   ]);
   if (accErr) throw accErr;
   if (catErr) throw catErr;
   const accountIdByName = new Map((accounts ?? []).map((a) => [a.name, a.id as string]));
+  const bankAccountKindByName = new Map((accounts ?? []).map((a) => [a.name, a.kind as string]));
   const categoryIdByName = new Map((categories ?? []).map((c) => [c.name, c.id as string]));
+
+  let otherIncomeCategoryId = categoryIdByName.get(OTHER_INCOME_CATEGORY);
+  if (!otherIncomeCategoryId) {
+    const { data: created, error: createCatErr } = await supabase
+      .from("categories")
+      .insert({ name: OTHER_INCOME_CATEGORY, is_custom: true })
+      .select("id")
+      .single();
+    if (createCatErr) throw createCatErr;
+    otherIncomeCategoryId = created.id as string;
+    categoryIdByName.set(OTHER_INCOME_CATEGORY, otherIncomeCategoryId);
+  }
 
   const summary: ImportSummary = { checked: ids.length, imported: 0, unrecognized: 0, failed: 0 };
 
@@ -108,7 +130,7 @@ export async function importTransactionsFromEmail(options: ImportOptions = {}): 
     const body = extractBody(msg.payload);
     const parsed = parseBankEmail(from, body);
 
-    if (!parsed || parsed.direction !== "debit") {
+    if (!parsed) {
       await addLabel(accessToken, id, unrecognizedLabelId);
       summary.unrecognized++;
       continue;
@@ -125,7 +147,25 @@ export async function importTransactionsFromEmail(options: ImportOptions = {}): 
     const occurredAt = new Date(Number(msg.internalDate)).toISOString();
     let rpcArgs: Record<string, unknown>;
 
-    if (looksLikeCardBillPayment(parsed.note)) {
+    if (parsed.direction === "credit") {
+      // Only a 'bank' account can be credited as salary (the RPC itself
+      // enforces this) — a credit hitting a credit card (e.g. a refund) has
+      // no safe automatic handling here, so it's left for manual entry.
+      if (bankAccountKindByName.get(accountName!) !== "bank") {
+        await addLabel(accessToken, id, unrecognizedLabelId);
+        summary.unrecognized++;
+        continue;
+      }
+      rpcArgs = {
+        p_amount: parsed.amountRupees,
+        p_kind: "salary",
+        p_account_id: accountId,
+        p_category_id: otherIncomeCategoryId,
+        p_linked_account_id: null as unknown as string,
+        p_note: parsed.note,
+        p_occurred_at: occurredAt,
+      };
+    } else if (looksLikeCardBillPayment(parsed.note)) {
       const cardName = detectBillPaymentCardName(parsed.note);
       const cardAccountId = cardName ? accountIdByName.get(cardName) : undefined;
       if (!cardAccountId) {

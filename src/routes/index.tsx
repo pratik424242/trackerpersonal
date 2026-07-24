@@ -382,7 +382,7 @@ function Journal() {
             const isUncategorized = isExpense && !t.category_id;
             const label =
               t.kind === "salary"
-                ? "Salary"
+                ? catName ?? "Salary"
                 : t.kind === "card_payment"
                 ? `Payment → ${t.linked_account_id ? accountsById[t.linked_account_id]?.name : "Card"}`
                 : catName ?? "Uncategorized";
