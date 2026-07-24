@@ -21,7 +21,7 @@ const LAST4_TO_ACCOUNT: Record<string, string> = {
 // uncategorized rather than guessing.
 const VPA_TO_CATEGORY: Record<string, string> = {
   "paytm-31109533@ptybl": "Office Food",
-  "gpay-12199745072@okbizaxis": "Office Food",
+  "gpay-12199745072@okbizaxis": "Outside Food",
 };
 
 // Credits (money received) can only be auto-imported as `kind: 'salary'` —
