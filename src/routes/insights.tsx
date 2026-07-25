@@ -32,6 +32,13 @@ function monthStart(offset: number) {
   return new Date(d.getFullYear(), d.getMonth() + offset, 1);
 }
 
+// Personal daily food budget — a virtual "discipline score", not real
+// income/expense math, so it's shown as its own card rather than folded
+// into Savings margin. Hardcoded rather than a settings UI since it's a
+// single personal preference; ask to change it if it ever needs to.
+const FOOD_CATEGORY_NAMES = ["Outside Food", "Office Food"];
+const FOOD_DAILY_BUDGET = 300;
+
 function InsightsPage() {
   const [monthOffset, setMonthOffset] = useState(0);
   const isCurrentMonth = monthOffset === 0;
@@ -81,6 +88,32 @@ function InsightsPage() {
     () => Object.fromEntries(limits.map((l) => [l.category_id, l.monthly_limit])),
     [limits],
   );
+
+  const foodBudget = useMemo(() => {
+    const foodCategoryIds = new Set(
+      categories.filter((c) => FOOD_CATEGORY_NAMES.includes(c.name)).map((c) => c.id),
+    );
+    if (foodCategoryIds.size === 0) return null;
+
+    const spendByDay = new Map<string, number>();
+    for (const t of thisMonth) {
+      if (t.kind !== "expense" || !t.category_id || !foodCategoryIds.has(t.category_id)) continue;
+      const key = new Date(t.occurred_at).toDateString();
+      spendByDay.set(key, (spendByDay.get(key) ?? 0) + Number(t.amount));
+    }
+
+    const daysInMonth = new Date(som.getFullYear(), som.getMonth() + 1, 0).getDate();
+    const daysTracked = isCurrentMonth ? today.getDate() : daysInMonth;
+
+    let total = 0;
+    let daysUnder = 0;
+    for (let d = 1; d <= daysTracked; d++) {
+      const spend = spendByDay.get(new Date(som.getFullYear(), som.getMonth(), d).toDateString()) ?? 0;
+      total += FOOD_DAILY_BUDGET - spend;
+      if (spend <= FOOD_DAILY_BUDGET) daysUnder++;
+    }
+    return { total, daysUnder, daysTracked };
+  }, [thisMonth, categories, som, isCurrentMonth, today]);
 
   const rows = categories
     .map((c) => ({
@@ -135,6 +168,28 @@ function InsightsPage() {
           )}
         </div>
       </section>
+
+      {foodBudget && (
+        <section>
+          <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-3">Food budget</h2>
+          <div className="rounded-xl border border-border/70 bg-surface p-4 md:p-5">
+            <p className="text-xs uppercase tracking-wider text-muted-foreground">
+              {isCurrentMonth ? "Saved so far" : "Saved"}
+            </p>
+            <p
+              className={`tnum mt-2 text-2xl md:text-3xl font-semibold ${
+                foodBudget.total < 0 ? "text-destructive" : "text-[color:var(--success)]"
+              }`}
+            >
+              {formatINR(foodBudget.total, { sign: true })}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground tnum">
+              ₹{FOOD_DAILY_BUDGET}/day · Outside Food + Office Food · {foodBudget.daysUnder} of {foodBudget.daysTracked}{" "}
+              days under budget
+            </p>
+          </div>
+        </section>
+      )}
 
       <section>
         <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-3">
