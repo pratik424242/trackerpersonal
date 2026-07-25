@@ -89,10 +89,21 @@ export async function importTransactionsFromEmail(options: ImportOptions = {}): 
     ensureLabel(accessToken, UNRECOGNIZED_LABEL),
   ]);
 
-  // Never scans mail from before the feature was turned on, so a first run
-  // can't flood the ledger with years of history. Override via `sinceDate`
-  // or EMAIL_IMPORT_START_DATE=YYYY-MM-DD if a backfill is ever wanted.
-  const sinceDate = options.sinceDate || process.env.EMAIL_IMPORT_START_DATE || new Date().toISOString().slice(0, 10);
+  // Bounded rolling window, not "today" — a fixed "today" cutoff sounds
+  // safe but actually breaks the daily cron's whole job: if a push
+  // notification is ever missed, the fallback cron runs on a *later*
+  // calendar day and "today" would already have rolled past the missed
+  // message, silently losing it forever instead of catching it. A rolling
+  // window still bounds a cold start (never floods in years of history)
+  // while actually giving the fallback something to catch. Already-
+  // processed mail is skipped via labels regardless of window size, so
+  // widening this is free. Override via `sinceDate` or
+  // EMAIL_IMPORT_START_DATE=YYYY-MM-DD for a one-off backfill further back.
+  const ROLLING_WINDOW_DAYS = 7;
+  const sinceDate =
+    options.sinceDate ||
+    process.env.EMAIL_IMPORT_START_DATE ||
+    new Date(Date.now() - ROLLING_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const senderQuery = SENDERS.map((s) => `from:${s}`).join(" OR ");
   const labelFilter = options.ignoreExistingLabels ? "" : ` -label:${IMPORTED_LABEL} -label:${UNRECOGNIZED_LABEL}`;
   const query = `(${senderQuery})${labelFilter} after:${sinceDate.replace(/-/g, "/")}`;
