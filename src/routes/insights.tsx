@@ -10,6 +10,7 @@ import {
   spendingLimitsQuery,
   upsertLimit,
 } from "@/lib/finance";
+import { useTheme } from "@/components/theme-provider";
 
 export const Route = createFileRoute("/insights")({
   head: () => ({
@@ -38,6 +39,23 @@ function monthStart(offset: number) {
 // single personal preference; ask to change it if it ever needs to.
 const FOOD_CATEGORY_NAMES = ["Outside Food", "Office Food"];
 const FOOD_DAILY_BUDGET = 300;
+
+// Fixed per-category colors (not assigned by rank) so a category is always
+// the same color regardless of how it ranks this month — from a validated
+// categorical palette (fixed hue order, CVD-checked). Categories beyond
+// this list, and anything past the 7-slot ceiling in a given month, fold
+// into a neutral "Other" rather than generating a new hue.
+const CATEGORY_COLORS: Record<string, { light: string; dark: string }> = {
+  "PG Rent": { light: "#2a78d6", dark: "#3987e5" },
+  Grocery: { light: "#eb6834", dark: "#d95926" },
+  "Office Food": { light: "#1baf7a", dark: "#199e70" },
+  "Outside Food": { light: "#eda100", dark: "#c98500" },
+  "PG Room": { light: "#e87ba4", dark: "#d55181" },
+  "Mutual Funds": { light: "#008300", dark: "#008300" },
+  "Personal Use Items": { light: "#4a3aa7", dark: "#9085e9" },
+};
+const OTHER_COLOR = { light: "#c3c2b7", dark: "#383835" };
+const CATEGORY_COLOR_SLOTS = 7;
 
 function InsightsPage() {
   const [monthOffset, setMonthOffset] = useState(0);
@@ -238,20 +256,84 @@ function InsightsPage() {
             No spending this month yet.
           </div>
         ) : (
-          <ul className="space-y-4">
-            {rows.map((r) => (
-              <CategoryRow
-                key={r.c.id}
-                categoryId={r.c.id}
-                name={r.c.name}
-                spent={r.spent}
-                lastSpent={r.lastSpent}
-                limit={r.limit}
-              />
-            ))}
-          </ul>
+          <>
+            <CategoryProportionBar rows={rows} totalSpend={monthSpend} />
+            <ul className="mt-5 space-y-4">
+              {rows.map((r) => (
+                <CategoryRow
+                  key={r.c.id}
+                  categoryId={r.c.id}
+                  name={r.c.name}
+                  spent={r.spent}
+                  lastSpent={r.lastSpent}
+                  limit={r.limit}
+                />
+              ))}
+            </ul>
+          </>
         )}
       </section>
+    </div>
+  );
+}
+
+// Part-to-whole breakdown as a single segmented bar rather than a pie —
+// easier to compare precisely, and extends the thin-bar language the
+// category-limit rows below already use instead of introducing a new
+// chart shape.
+function CategoryProportionBar({
+  rows,
+  totalSpend,
+}: {
+  rows: { c: { id: string; name: string }; spent: number }[];
+  totalSpend: number;
+}) {
+  const { theme } = useTheme();
+  const isDark = theme === "dark";
+
+  const spendRows = rows.filter((r) => r.spent > 0).sort((a, b) => b.spent - a.spent);
+  const top = spendRows.slice(0, CATEGORY_COLOR_SLOTS);
+  const otherTotal = spendRows.slice(CATEGORY_COLOR_SLOTS).reduce((s, r) => s + r.spent, 0);
+
+  const segments = [
+    ...top.map((r) => ({
+      key: r.c.id,
+      name: r.c.name,
+      amount: r.spent,
+      color: CATEGORY_COLORS[r.c.name] ?? OTHER_COLOR,
+    })),
+    ...(otherTotal > 0 ? [{ key: "__other", name: "Other", amount: otherTotal, color: OTHER_COLOR }] : []),
+  ];
+
+  if (segments.length === 0 || totalSpend <= 0) return null;
+
+  return (
+    <div className="rounded-xl border border-border/70 bg-surface p-4 md:p-5">
+      <div className="flex h-2.5 w-full gap-0.5 overflow-hidden rounded-full bg-muted">
+        {segments.map((s, i) => (
+          <div
+            key={s.key}
+            style={{
+              width: `${(s.amount / totalSpend) * 100}%`,
+              backgroundColor: isDark ? s.color.dark : s.color.light,
+            }}
+            className={i === 0 ? "rounded-l-full" : i === segments.length - 1 ? "rounded-r-full" : ""}
+          />
+        ))}
+      </div>
+      <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2">
+        {segments.map((s) => (
+          <div key={s.key} className="flex items-center gap-1.5 text-xs">
+            <span
+              className="size-2 shrink-0 rounded-full"
+              style={{ backgroundColor: isDark ? s.color.dark : s.color.light }}
+              aria-hidden="true"
+            />
+            <span className="text-muted-foreground">{s.name}</span>
+            <span className="tnum font-medium">{Math.round((s.amount / totalSpend) * 100)}%</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

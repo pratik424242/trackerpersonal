@@ -24,6 +24,16 @@ const VPA_TO_CATEGORY: Record<string, string> = {
   "gpay-12199745072@okbizaxis": "Outside Food",
 };
 
+// Same idea, but for merchants whose note doesn't come through as a stable
+// exact VPA (e.g. ICICI's "Info:" field sometimes reduces to just a bare
+// merchant name like "zerodha") — matched by substring against the note
+// instead. Checked after the exact-VPA map.
+const NOTE_KEYWORD_TO_CATEGORY: Array<[RegExp, string]> = [[/zerodha/i, "Mutual Funds"]];
+
+function categoryFromNoteKeyword(note: string): string | undefined {
+  return NOTE_KEYWORD_TO_CATEGORY.find(([pattern]) => pattern.test(note))?.[1];
+}
+
 // Credits (money received) can only be auto-imported as `kind: 'salary'` —
 // that's the only transaction type this schema allows to credit a bank
 // account. Tagging every credit with this category instead of leaving it
@@ -196,7 +206,8 @@ export async function importTransactionsFromEmail(options: ImportOptions = {}): 
         p_occurred_at: occurredAt,
       };
     } else {
-      const categoryName = parsed.vpa ? VPA_TO_CATEGORY[parsed.vpa.toLowerCase()] : undefined;
+      const categoryName =
+        (parsed.vpa ? VPA_TO_CATEGORY[parsed.vpa.toLowerCase()] : undefined) ?? categoryFromNoteKeyword(parsed.note);
       const categoryId = categoryName ? categoryIdByName.get(categoryName) : undefined;
       rpcArgs = {
         p_amount: parsed.amountRupees,
