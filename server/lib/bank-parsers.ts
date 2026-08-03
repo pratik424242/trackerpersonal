@@ -78,6 +78,24 @@ export function parseHdfc(text: string): ParsedTxn | null {
     };
   }
 
+  // ACH/NACH mandate debit (e.g. a SIP autopay), e.g.
+  // "Rs. INR 5,500.00 is deducted from your account ending XX0702 and
+  //  added to ACH D- ZERODHA BROKING LTD-R3U9UC8YSM4N7 account on
+  //  03-AUG-2026." — a different template from the UPI alerts above,
+  // used for standing-instruction debits rather than one-off payments.
+  m = text.match(
+    /Rs\.?\s*INR\s*([\d,]+\.\d{2})\s+is\s+deducted\s+from\s+your\s+account\s+ending\s+X{0,2}(\d{4})\s+and\s+added\s+to\s+(.+?)\s+account\s+on\s+\d{2}-[A-Z]{3}-\d{4}/i,
+  );
+  if (m) {
+    const payee = m[3].trim().replace(/^ACH\s*[A-Z]-\s*/i, "");
+    return {
+      amountRupees: toAmount(m[1]),
+      direction: "debit",
+      last4: m[2],
+      note: payee,
+    };
+  }
+
   return null;
 }
 
