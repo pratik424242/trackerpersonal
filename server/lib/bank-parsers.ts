@@ -78,6 +78,25 @@ export function parseHdfc(text: string): ParsedTxn | null {
     };
   }
 
+  // Interbank NEFT/RTGS credit ("New Deposit Alert"), e.g. salary paid in
+  // by direct transfer rather than UPI:
+  // "You have received a credit in your HDFC Bank account.
+  //  Details of the transaction:
+  //   Amount received: INR 40,611.21
+  //   Account: XX0702
+  //   Reference Details: A2AINT01-GOLDMAN SACHS SERVICES PRIVATE LIMITED-..."
+  m = text.match(
+    /Amount\s+received:\s*INR\s*([\d,]+\.\d{2})[\s\S]{0,200}?Account:\s*X{0,2}(\d{4})[\s\S]{0,300}?Reference\s+Details:\s*([^\n]+)/i,
+  );
+  if (m) {
+    return {
+      amountRupees: toAmount(m[1]),
+      direction: "credit",
+      last4: m[2],
+      note: m[3].trim(),
+    };
+  }
+
   // ACH/NACH mandate debit (e.g. a SIP autopay), e.g.
   // "Rs. INR 5,500.00 is deducted from your account ending XX0702 and
   //  added to ACH D- ZERODHA BROKING LTD-R3U9UC8YSM4N7 account on
