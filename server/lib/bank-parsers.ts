@@ -97,6 +97,23 @@ export function parseHdfc(text: string): ParsedTxn | null {
     };
   }
 
+  // NACH mandate debit, sent from a different sub-address
+  // (nachautoemailer@hdfcbank.bank.in) than the usual InstaAlerts mail, e.g.
+  // "Rs.500.00 has been debited from HDFC Bank Account Number
+  //  XXXXXXXXXX0702 towards INDIAN CLEARING CORP LTD/TWF178 with UMRN
+  //  HDFC7022403244000773 on 04-Aug-2026."
+  m = text.match(
+    /Rs\.?\s*([\d,]+\.\d{2})\s+has\s+been\s+debited\s+from\s+HDFC\s+Bank\s+Account\s+Number\s+X*(\d{4})\s+towards\s+(.+?)\s+with\s+UMRN/i,
+  );
+  if (m) {
+    return {
+      amountRupees: toAmount(m[1]),
+      direction: "debit",
+      last4: m[2],
+      note: m[3].trim(),
+    };
+  }
+
   // ACH/NACH mandate debit (e.g. a SIP autopay), e.g.
   // "Rs. INR 5,500.00 is deducted from your account ending XX0702 and
   //  added to ACH D- ZERODHA BROKING LTD-R3U9UC8YSM4N7 account on

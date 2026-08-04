@@ -3,7 +3,12 @@ import { addLabel, ensureLabel, getAccessToken, getMessage, listMessageIds } fro
 import { extractBody } from "./extract-body";
 import { parseBankEmail } from "./bank-parsers";
 
-const SENDERS = ["alerts@hdfcbank.bank.in", "credit_cards@icici.bank.in"];
+// Domain-level, not exact addresses — HDFC in particular sends alerts from
+// several different sub-addresses depending on alert type (alerts@,
+// nachautoemailer@ for NACH mandate debits, etc.), and a narrower exact-match
+// list silently drops a whole class of mail from the search itself, before
+// parsing ever gets a chance to run.
+const SENDERS = ["hdfcbank.bank.in", "icici.bank.in"];
 
 const IMPORTED_LABEL = "LedgerImported";
 const UNRECOGNIZED_LABEL = "LedgerUnrecognized";
