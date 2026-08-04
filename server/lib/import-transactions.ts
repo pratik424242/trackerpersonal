@@ -33,7 +33,13 @@ const VPA_TO_CATEGORY: Record<string, string> = {
 // exact VPA (e.g. ICICI's "Info:" field sometimes reduces to just a bare
 // merchant name like "zerodha") — matched by substring against the note
 // instead. Checked after the exact-VPA map.
-const NOTE_KEYWORD_TO_CATEGORY: Array<[RegExp, string]> = [[/zerodha/i, "Mutual Funds"]];
+const NOTE_KEYWORD_TO_CATEGORY: Array<[RegExp, string]> = [
+  [/zerodha/i, "Mutual Funds"],
+  // NACH mandate debits toward Zerodha route through the NSE/BSE clearing
+  // corp rather than naming Zerodha directly — same mandate (UMRN
+  // HDFC7022403244000773) every time, confirmed with the user.
+  [/indian clearing corp/i, "Mutual Funds"],
+];
 
 function categoryFromNoteKeyword(note: string): string | undefined {
   return NOTE_KEYWORD_TO_CATEGORY.find(([pattern]) => pattern.test(note))?.[1];
