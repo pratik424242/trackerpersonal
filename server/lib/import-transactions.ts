@@ -1,4 +1,4 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { addLabel, ensureLabel, getAccessToken, getMessage, listMessageIds } from "./gmail-client";
 import { extractBody } from "./extract-body";
 import { parseBankEmail } from "./bank-parsers";
@@ -71,6 +71,37 @@ const CREDIT_CARD_ACCOUNT_NAMES = ["HDFC", "ICICI"];
 function detectBillPaymentCardName(note: string): string | null {
   const matches = CREDIT_CARD_ACCOUNT_NAMES.filter((name) => new RegExp(name, "i").test(note));
   return matches.length === 1 ? matches[0] : null;
+}
+
+// A concurrent-processing guard, independent of the Gmail labels. Labels
+// alone aren't safe against two runs (e.g. a manual trigger racing a
+// just-renewed push notification) both listing the same unlabeled message
+// before either has finished labeling it — this happened in practice and
+// double-imported. Claiming a message id here first, atomically via the
+// table's primary key, means only one concurrent run can ever proceed to
+// apply_transaction for a given message.
+const CLAIM_STALE_MS = 10 * 60 * 1000; // long enough to cover a real in-flight run, short enough that a crashed run doesn't block the message forever
+
+async function claimMessage(supabase: SupabaseClient, id: string): Promise<boolean> {
+  const { error } = await supabase.from("imported_email_messages").insert({ gmail_message_id: id });
+  if (!error) return true;
+  if (error.code !== "23505") throw error;
+
+  const { data: existing } = await supabase
+    .from("imported_email_messages")
+    .select("imported_at")
+    .eq("gmail_message_id", id)
+    .single();
+  const isStale = existing && Date.now() - new Date(existing.imported_at as string).getTime() > CLAIM_STALE_MS;
+  if (!isStale) return false;
+
+  await supabase.from("imported_email_messages").delete().eq("gmail_message_id", id);
+  const { error: retryErr } = await supabase.from("imported_email_messages").insert({ gmail_message_id: id });
+  return !retryErr;
+}
+
+async function releaseClaim(supabase: SupabaseClient, id: string): Promise<void> {
+  await supabase.from("imported_email_messages").delete().eq("gmail_message_id", id);
 }
 
 function supabaseServer() {
@@ -157,6 +188,13 @@ export async function importTransactionsFromEmail(options: ImportOptions = {}): 
   const summary: ImportSummary = { checked: ids.length, imported: 0, unrecognized: 0, failed: 0 };
 
   for (const id of ids) {
+    const claimed = await claimMessage(supabase, id);
+    if (!claimed) {
+      // A concurrent run already has this one — it'll get labeled by
+      // whichever run finishes, so it just won't show up unlabeled next time.
+      continue;
+    }
+
     const msg = await getMessage(accessToken, id);
     const from = msg.payload.headers.find((h) => h.name.toLowerCase() === "from")?.value ?? "";
     const body = extractBody(msg.payload);
@@ -236,7 +274,8 @@ export async function importTransactionsFromEmail(options: ImportOptions = {}): 
     if (error) {
       console.error(`[import-emails] apply_transaction failed for message ${id}:`, error.message);
       summary.failed++;
-      continue; // leave unlabeled so the next run retries it
+      await releaseClaim(supabase, id); // leave unlabeled and unclaimed so the next run retries it
+      continue;
     }
 
     await addLabel(accessToken, id, importedLabelId);
