@@ -78,6 +78,22 @@ export function parseHdfc(text: string): ParsedTxn | null {
     };
   }
 
+  // Credit card merchant debit ("A payment was made using your Credit
+  // Card"), naming the merchant directly rather than a VPA in parens, e.g.
+  // "Rs. 160.00 has been debited from your HDFC Bank Credit Card ending
+  //  2149 towards SWIGGYFOOD on 08 Aug, 2026 at 19:37:38."
+  m = text.match(
+    /Rs\.?\s*([\d,]+\.\d{2})\s+has\s+been\s+(debited|credited)\s+from\s+your\s+HDFC\s+Bank\s+Credit\s+Card\s+ending\s+(\d{4})\s+towards\s+(.+?)\s+on\s+\d{1,2}\s+[A-Za-z]{3},?\s+\d{4}/i,
+  );
+  if (m) {
+    return {
+      amountRupees: toAmount(m[1]),
+      direction: toDirection(m[2]),
+      last4: m[3],
+      note: m[4].trim(),
+    };
+  }
+
   // Interbank NEFT/RTGS credit ("New Deposit Alert"), e.g. salary paid in
   // by direct transfer rather than UPI:
   // "You have received a credit in your HDFC Bank account.
