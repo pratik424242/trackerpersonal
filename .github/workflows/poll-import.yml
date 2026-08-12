@@ -1,0 +1,26 @@
+name: Poll email import
+
+# Backstop for Gmail push notifications, which have repeatedly gone silent
+# for many hours despite watch-renewal hardening in the app itself. Vercel
+# Hobby's own cron is capped at once/day, leaving a large blind spot — this
+# polls independently of Gmail's push mechanism entirely, every 10 minutes.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger import
+        run: |
+          status=$(curl -sS -o /tmp/body.txt -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "https://trackerpersonal-phi.vercel.app/api/import-emails")
+          cat /tmp/body.txt
+          echo
+          if [ "$status" -ge 300 ]; then
+            echo "Import endpoint returned HTTP $status"
+            exit 1
+          fi
