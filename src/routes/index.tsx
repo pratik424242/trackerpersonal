@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, Inbox, Pencil, Plus, StickyNote, Trash2, X } from "lucide-react";
+import { ArrowLeftRight, CalendarDays, Inbox, Pencil, Plus, StickyNote, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import {
   accountsQuery,
@@ -14,6 +14,7 @@ import {
   editTransaction,
   formatINR,
   isoToDateInput,
+  netTransactions,
   restoreTransaction,
   transactionsQuery,
   type Account,
@@ -52,6 +53,7 @@ function Journal() {
   const [dateOpen, setDateOpen] = useState(false);
   const [dateStr, setDateStr] = useState(todayInput);
   const [editingTxn, setEditingTxn] = useState<Transaction | null>(null);
+  const [nettingTxn, setNettingTxn] = useState<Transaction | null>(null);
   const amountRef = useRef<HTMLInputElement>(null);
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const appliedStoredAccount = useRef(false);
@@ -145,6 +147,18 @@ function Journal() {
       qc.invalidateQueries({ queryKey: ["accounts"] });
       setEditingTxn(null);
       toast.success("Updated");
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const netMut = useMutation({
+    mutationFn: (args: { a: Transaction; b: Transaction; category_id: string | null; note: string | null }) =>
+      netTransactions(args.a, args.b, { category_id: args.category_id, note: args.note }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["transactions"] });
+      qc.invalidateQueries({ queryKey: ["accounts"] });
+      setNettingTxn(null);
+      toast.success("Netted");
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -447,7 +461,28 @@ function Journal() {
           onClose={() => setEditingTxn(null)}
           onSave={(updates) => editMut.mutate({ original: editingTxn, ...updates })}
           onDelete={() => handleDelete(editingTxn)}
+          onNet={
+            editingTxn.kind === "card_payment"
+              ? undefined
+              : () => {
+                  setNettingTxn(editingTxn);
+                  setEditingTxn(null);
+                }
+          }
           saving={editMut.isPending}
+        />
+      )}
+
+      {nettingTxn && (
+        <NetModal
+          primary={nettingTxn}
+          candidates={transactions.filter(
+            (t) => t.account_id === nettingTxn.account_id && t.id !== nettingTxn.id && t.kind !== "card_payment",
+          )}
+          categories={categories}
+          onClose={() => setNettingTxn(null)}
+          onConfirm={(pair, opts) => netMut.mutate({ a: nettingTxn, b: pair, ...opts })}
+          netting={netMut.isPending}
         />
       )}
     </div>
@@ -461,6 +496,7 @@ function EditTransactionModal({
   onClose,
   onSave,
   onDelete,
+  onNet,
   saving,
 }: {
   txn: Transaction;
@@ -476,6 +512,7 @@ function EditTransactionModal({
     occurred_at: string;
   }) => void;
   onDelete: () => void;
+  onNet?: () => void;
   saving: boolean;
 }) {
   const isCardPayment = txn.kind === "card_payment";
@@ -587,6 +624,15 @@ function EditTransactionModal({
           >
             Delete
           </button>
+          {onNet && (
+            <button
+              onClick={onNet}
+              aria-label="Net against another entry"
+              className="h-10 w-10 grid place-items-center rounded-lg border border-border text-muted-foreground hover:text-foreground hover:border-foreground/40 transition-colors"
+            >
+              <ArrowLeftRight className="size-4" />
+            </button>
+          )}
           <button
             onClick={save}
             disabled={saving}
@@ -595,6 +641,141 @@ function EditTransactionModal({
             {saving ? "Saving…" : "Save"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// Settles a transaction against another entry on the same account (e.g. a
+// loan given, once repaid) — pick the pair, then collapse both into one
+// entry for the difference instead of leaving both sitting in the ledger.
+function NetModal({
+  primary,
+  candidates,
+  categories,
+  onClose,
+  onConfirm,
+  netting,
+}: {
+  primary: Transaction;
+  candidates: Transaction[];
+  categories: { id: string; name: string }[];
+  onClose: () => void;
+  onConfirm: (pair: Transaction, opts: { category_id: string | null; note: string | null }) => void;
+  netting: boolean;
+}) {
+  const [pair, setPair] = useState<Transaction | null>(null);
+  const [categoryId, setCategoryId] = useState<string | null>(null);
+  const [note, setNote] = useState("");
+
+  const signed = (t: Transaction) => (t.kind === "salary" ? Number(t.amount) : -Number(t.amount));
+  const net = pair ? signed(primary) + signed(pair) : 0;
+  const resultKind = net > 0 ? "credit" : net < 0 ? "expense" : null;
+
+  function pick(t: Transaction) {
+    setPair(t);
+    setNote(`Netted: ${primary.note || formatINR(Number(primary.amount))} ↔ ${t.note || formatINR(Number(t.amount))}`);
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-end md:items-center justify-center bg-background/70 backdrop-blur-sm px-0 md:px-4" onClick={onClose}>
+      <div
+        className="w-full md:max-w-md rounded-t-2xl md:rounded-xl border border-border bg-surface p-5 md:p-6 pb-[calc(env(safe-area-inset-bottom)+1.25rem)] md:pb-6"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <p className="text-sm font-medium">{pair ? "Confirm net" : "Net against…"}</p>
+          <button onClick={onClose} aria-label="Close" className="text-muted-foreground hover:text-foreground">
+            <X className="size-4" />
+          </button>
+        </div>
+
+        {!pair ? (
+          <>
+            <p className="text-xs text-muted-foreground mb-3">
+              Pick the entry on the same account to net {primary.note || formatINR(Number(primary.amount))} against.
+            </p>
+            <ul className="max-h-[50vh] overflow-y-auto divide-y divide-border/60 -mx-1">
+              {candidates.map((t) => (
+                <li key={t.id}>
+                  <button
+                    onClick={() => pick(t)}
+                    className="w-full flex items-center justify-between gap-3 py-3 px-1 text-left hover:bg-muted/40 rounded-md transition-colors"
+                  >
+                    <span className="text-sm truncate">{t.note || (t.kind === "salary" ? "Income" : "Expense")}</span>
+                    <span className={`tnum text-sm shrink-0 ${t.kind === "salary" ? "text-[color:var(--success)]" : ""}`}>
+                      {t.kind === "salary" ? "+" : "−"}
+                      {formatINR(Number(t.amount))}
+                    </span>
+                  </button>
+                </li>
+              ))}
+              {candidates.length === 0 && (
+                <li className="py-6 text-center text-sm text-muted-foreground">
+                  No other entries on this account to net against.
+                </li>
+              )}
+            </ul>
+          </>
+        ) : (
+          <>
+            <div className="mb-4 rounded-lg border border-border bg-muted/30 p-3 text-sm">
+              <div className="flex items-center justify-between text-muted-foreground">
+                <span className="truncate">{primary.note || formatINR(Number(primary.amount))}</span>
+                <span className="tnum shrink-0">{primary.kind === "salary" ? "+" : "−"}{formatINR(Number(primary.amount))}</span>
+              </div>
+              <div className="flex items-center justify-between text-muted-foreground mt-1">
+                <span className="truncate">{pair.note || formatINR(Number(pair.amount))}</span>
+                <span className="tnum shrink-0">{pair.kind === "salary" ? "+" : "−"}{formatINR(Number(pair.amount))}</span>
+              </div>
+              <div className="flex items-center justify-between mt-2 pt-2 border-t border-border font-medium">
+                <span>{resultKind ? "Results in" : "Cancels out exactly"}</span>
+                {resultKind && (
+                  <span className={`tnum ${resultKind === "credit" ? "text-[color:var(--success)]" : ""}`}>
+                    {resultKind === "credit" ? "+" : "−"}
+                    {formatINR(Math.abs(net))}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {resultKind && (
+              <>
+                <div className="-mx-1 overflow-x-auto scrollbar-none mb-3">
+                  <div className="flex gap-2 px-1 pb-1">
+                    {categories.map((c) => (
+                      <Chip key={c.id} active={categoryId === c.id} onClick={() => setCategoryId(c.id)}>
+                        {c.name}
+                      </Chip>
+                    ))}
+                  </div>
+                </div>
+                <input
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  placeholder="Note (optional)"
+                  className="w-full h-9 px-3 rounded-md bg-muted/50 border border-border text-sm outline-none focus:border-primary mb-4"
+                />
+              </>
+            )}
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPair(null)}
+                className="h-10 px-4 rounded-lg border border-border text-muted-foreground text-sm hover:text-foreground transition-colors"
+              >
+                Back
+              </button>
+              <button
+                onClick={() => onConfirm(pair, { category_id: categoryId, note: note.trim() || null })}
+                disabled={netting}
+                className="flex-1 h-10 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-60 transition-opacity"
+              >
+                {netting ? "Netting…" : "Confirm net"}
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

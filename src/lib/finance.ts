@@ -193,6 +193,43 @@ export async function editTransaction(
   });
 }
 
+// Settles two entries on the same account against each other — e.g. a
+// loan given (expense) and its repayment (salary) — collapsing them into
+// a single entry for the difference instead of leaving both sitting in
+// the ledger forever. Deletes both originals and, unless they cancel out
+// exactly, applies one new entry for the net amount under the resulting
+// sign's kind. card_payment is excluded: it already touches two accounts
+// at once, which doesn't fit this same-account netting model.
+export async function netTransactions(
+  a: Transaction,
+  b: Transaction,
+  opts: { category_id: string | null; note: string | null },
+) {
+  if (a.account_id !== b.account_id) {
+    throw new Error("Can only net two entries on the same account");
+  }
+  if (a.kind === "card_payment" || b.kind === "card_payment") {
+    throw new Error("Card payments can't be netted");
+  }
+
+  const signed = (t: Transaction) => (t.kind === "salary" ? Number(t.amount) : -Number(t.amount));
+  const net = signed(a) + signed(b);
+
+  await deleteTransaction(a.id);
+  await deleteTransaction(b.id);
+
+  if (Math.abs(net) < 0.005) return; // cancels out exactly — nothing left to record
+
+  await applyTransaction({
+    amount: Math.abs(net),
+    kind: net > 0 ? "salary" : "expense",
+    account_id: a.account_id,
+    category_id: opts.category_id,
+    note: opts.note,
+    occurred_at: new Date().toISOString(),
+  });
+}
+
 export async function addCategory(name: string) {
   const { data, error } = await supabase
     .from("categories")
