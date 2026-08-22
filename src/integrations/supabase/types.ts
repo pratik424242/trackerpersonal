@@ -102,6 +102,7 @@ export type Database = {
           linked_account_id: string | null
           note: string | null
           occurred_at: string
+          person: string | null
         }
         Insert: {
           account_id: string
@@ -113,6 +114,7 @@ export type Database = {
           linked_account_id?: string | null
           note?: string | null
           occurred_at?: string
+          person?: string | null
         }
         Update: {
           account_id?: string
@@ -124,6 +126,7 @@ export type Database = {
           linked_account_id?: string | null
           note?: string | null
           occurred_at?: string
+          person?: string | null
         }
         Relationships: [
           {
@@ -163,6 +166,7 @@ export type Database = {
           p_linked_account_id: string
           p_note: string
           p_occurred_at: string
+          p_person?: string
         }
         Returns: string
       }

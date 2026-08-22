@@ -6,7 +6,9 @@ import {
   accountsQuery,
   applyTransaction,
   formatINR,
+  receivablesQuery,
   setAccountBalance,
+  totalOutstanding,
   type Account,
 } from "@/lib/finance";
 
@@ -17,30 +19,38 @@ export const Route = createFileRoute("/accounts")({
       { name: "description", content: "Net worth and account balances." },
     ],
   }),
-  loader: ({ context }) => context.queryClient.ensureQueryData(accountsQuery),
+  loader: ({ context }) =>
+    Promise.all([
+      context.queryClient.ensureQueryData(accountsQuery),
+      context.queryClient.ensureQueryData(receivablesQuery),
+    ]),
   component: AccountsPage,
 });
 
 function AccountsPage() {
   const { data: accounts = [] } = useQuery(accountsQuery);
+  const { data: settlements = [] } = useQuery(receivablesQuery);
 
   const bank = accounts.find((a) => a.kind === "bank");
   const cards = accounts.filter((a) => a.kind === "credit_card");
   const debt = cards.reduce((s, c) => s + c.balance, 0);
-  const netWorth = (bank?.balance ?? 0) - debt;
+  const owed = totalOutstanding(settlements);
+  const netWorth = (bank?.balance ?? 0) - debt + owed;
 
   return (
     <div className="space-y-6 md:space-y-10">
       <section>
         <p className="text-xs uppercase tracking-wider text-muted-foreground">Net worth</p>
-        <p className={`tnum mt-2 text-4xl md:text-6xl font-semibold tracking-tight ${netWorth < 0 ? "text-destructive" : ""}`}>
+        <p
+          className={`tnum mt-2 text-4xl md:text-6xl font-semibold tracking-tight ${netWorth < 0 ? "text-destructive" : ""}`}
+        >
           {formatINR(netWorth)}
         </p>
         <p className="mt-2 text-xs md:text-sm text-muted-foreground tnum">
           {formatINR(bank?.balance ?? 0)} in bank · {formatINR(debt)} owed on cards
+          {owed > 0 && <> · {formatINR(owed)} owed by others</>}
         </p>
       </section>
-
 
       <section className="space-y-3">
         {accounts.map((a) => (
@@ -98,11 +108,12 @@ function AccountCard({ account, bank }: { account: Account; bank: Account | null
 
   return (
     <div className="rounded-xl border border-border/70 bg-surface p-4 md:p-5">
-
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-xs uppercase tracking-wider text-muted-foreground">{account.name}</p>
-          <p className="text-[11px] text-muted-foreground/70 mt-0.5">{isCard ? "Liability" : "Asset"}</p>
+          <p className="text-[11px] text-muted-foreground/70 mt-0.5">
+            {isCard ? "Liability" : "Asset"}
+          </p>
         </div>
         {editing ? (
           <div className="flex items-center gap-1">
@@ -113,12 +124,22 @@ function AccountCard({ account, bank }: { account: Account; bank: Account | null
               onChange={(e) => setValue(e.target.value.replace(/[^0-9.]/g, ""))}
               className="tnum w-32 bg-muted/50 border border-border rounded-md px-2 py-1 text-right text-sm outline-none focus:border-primary"
             />
-            <button onClick={() => saveMut.mutate()} className="text-xs text-primary px-2">Save</button>
-            <button onClick={() => setEditing(false)} className="text-xs text-muted-foreground px-1">Cancel</button>
+            <button onClick={() => saveMut.mutate()} className="text-xs text-primary px-2">
+              Save
+            </button>
+            <button
+              onClick={() => setEditing(false)}
+              className="text-xs text-muted-foreground px-1"
+            >
+              Cancel
+            </button>
           </div>
         ) : (
           <button
-            onClick={() => { setValue(String(account.balance)); setEditing(true); }}
+            onClick={() => {
+              setValue(String(account.balance));
+              setEditing(true);
+            }}
             className="text-xs text-muted-foreground hover:text-foreground"
           >
             Adjust
@@ -128,7 +149,9 @@ function AccountCard({ account, bank }: { account: Account; bank: Account | null
 
       <div className="mt-4 flex items-baseline justify-between">
         <span className="text-xs text-muted-foreground">{label}</span>
-        <span className={`tnum text-2xl font-semibold ${isCard && account.balance > 0 ? "text-destructive" : ""}`}>
+        <span
+          className={`tnum text-2xl font-semibold ${isCard && account.balance > 0 ? "text-destructive" : ""}`}
+        >
           {formatINR(account.balance)}
         </span>
       </div>
@@ -176,7 +199,9 @@ function AccountCard({ account, bank }: { account: Account; bank: Account | null
             >
               Confirm
             </button>
-            <button onClick={() => setModal(null)} className="text-xs text-muted-foreground px-2">Cancel</button>
+            <button onClick={() => setModal(null)} className="text-xs text-muted-foreground px-2">
+              Cancel
+            </button>
           </div>
         </div>
       )}

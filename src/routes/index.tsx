@@ -1,7 +1,16 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeftRight, CalendarDays, Inbox, Pencil, Plus, StickyNote, Trash2, X } from "lucide-react";
+import {
+  ArrowLeftRight,
+  CalendarDays,
+  Inbox,
+  Pencil,
+  Plus,
+  StickyNote,
+  Trash2,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
   accountsQuery,
@@ -14,14 +23,20 @@ import {
   editTransaction,
   formatINR,
   isoToDateInput,
+  isSettlement,
+  knownPeople,
   netTransactions,
+  receivablesByPerson,
+  receivablesQuery,
   restoreTransaction,
   transactionsQuery,
   type Account,
   type Transaction,
+  type TransactionKind,
 } from "@/lib/finance";
 
 const LAST_ACCOUNT_KEY = "ledger:lastAccountId";
+const LAST_PERSON_KEY = "ledger:lastPerson";
 const todayInput = () => isoToDateInput(new Date().toISOString());
 
 export const Route = createFileRoute("/")({
@@ -30,6 +45,7 @@ export const Route = createFileRoute("/")({
       context.queryClient.ensureQueryData(accountsQuery),
       context.queryClient.ensureQueryData(categoriesQuery),
       context.queryClient.ensureQueryData(transactionsQuery),
+      context.queryClient.ensureQueryData(receivablesQuery),
     ]),
   component: Journal,
 });
@@ -39,8 +55,11 @@ function Journal() {
   const { data: accounts = [] } = useQuery(accountsQuery);
   const { data: categories = [] } = useQuery(categoriesQuery);
   const { data: transactions = [] } = useQuery(transactionsQuery);
+  const { data: settlements = [] } = useQuery(receivablesQuery);
 
   const [amount, setAmount] = useState("");
+  const [entryKind, setEntryKind] = useState<"expense" | "lent" | "repayment">("expense");
+  const [person, setPerson] = useState("");
   const [categoryId, setCategoryId] = useState<string | null>(null);
   const [accountId, setAccountId] = useState<string | null>(null);
   const [showAddCat, setShowAddCat] = useState(false);
@@ -59,6 +78,50 @@ function Journal() {
   const appliedStoredAccount = useRef(false);
 
   const activeAccountId = accountId ?? accounts[0]?.id ?? null;
+  const bankAccounts = accounts.filter((a) => a.kind === "bank");
+
+  // Repayments can only credit a bank account (the RPC enforces this), so if
+  // the remembered source is a card, fall back to the first bank.
+  const effectiveAccountId =
+    entryKind === "repayment" &&
+    !(activeAccountId && accounts.find((a) => a.id === activeAccountId)?.kind === "bank")
+      ? (bankAccounts[0]?.id ?? null)
+      : activeAccountId;
+
+  // Known people + what each still owes — powers autocomplete and the
+  // "tap a name to fill what they owe" shortcut.
+  const people = useMemo(() => knownPeople(settlements), [settlements]);
+  const outstandingByPerson = useMemo(
+    () =>
+      Object.fromEntries(
+        receivablesByPerson(settlements).map((r) => [r.person.toLowerCase(), r.outstanding]),
+      ) as Record<string, number>,
+    [settlements],
+  );
+  const personSuggestions = useMemo(() => {
+    if (entryKind === "expense") return [];
+    const q = person.trim().toLowerCase();
+    return people.filter((p) => !q || p.name.toLowerCase().includes(q)).slice(0, 6);
+  }, [people, person, entryKind]);
+
+  function selectEntryKind(kind: "expense" | "lent" | "repayment") {
+    setEntryKind(kind);
+    // Prefill the last-used person so repeat lends/repayments cost no typing.
+    if (kind !== "expense") {
+      const stored = window.localStorage.getItem(LAST_PERSON_KEY);
+      if (stored && !person.trim()) setPerson(stored);
+    }
+  }
+
+  function pickPerson(name: string) {
+    setPerson(name);
+    window.localStorage.setItem(LAST_PERSON_KEY, name);
+    // Logging a repayment is almost always for the full remaining amount.
+    if (entryKind === "repayment" && !amount) {
+      const owed = outstandingByPerson[name.toLowerCase()];
+      if (owed && owed > 0) setAmount(String(owed));
+    }
+  }
 
   // Default to whichever payment source was used last session (still a
   // visible, overridable choice — just saves a tap on repeat entries).
@@ -94,11 +157,13 @@ function Journal() {
 
   const logMut = useMutation({
     mutationFn: applyTransaction,
-    onSuccess: () => {
+    onSuccess: (_res, vars) => {
+      if (vars.person) window.localStorage.setItem(LAST_PERSON_KEY, vars.person);
       qc.invalidateQueries({ queryKey: ["transactions"] });
       qc.invalidateQueries({ queryKey: ["accounts"] });
       setAmount("");
       setCategoryId(null);
+      setPerson("");
       setNote("");
       setNoteOpen(false);
       setDateOpen(false);
@@ -136,10 +201,12 @@ function Journal() {
     mutationFn: (args: {
       original: Transaction;
       amount: number;
+      kind: TransactionKind;
       category_id: string | null;
       account_id: string;
       linked_account_id: string | null;
       note: string | null;
+      person: string | null;
       occurred_at: string;
     }) => editTransaction(args.original, args),
     onSuccess: () => {
@@ -152,8 +219,12 @@ function Journal() {
   });
 
   const netMut = useMutation({
-    mutationFn: (args: { a: Transaction; b: Transaction; category_id: string | null; note: string | null }) =>
-      netTransactions(args.a, args.b, { category_id: args.category_id, note: args.note }),
+    mutationFn: (args: {
+      a: Transaction;
+      b: Transaction;
+      category_id: string | null;
+      note: string | null;
+    }) => netTransactions(args.a, args.b, { category_id: args.category_id, note: args.note }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["transactions"] });
       qc.invalidateQueries({ queryKey: ["accounts"] });
@@ -204,13 +275,22 @@ function Journal() {
   function submit() {
     const n = Number(amount);
     if (!n || n <= 0) return toast.error("Enter an amount");
-    if (!categoryId) return toast.error("Pick a category");
-    if (!activeAccountId) return toast.error("Pick a payment source");
+    if (!effectiveAccountId)
+      return toast.error(
+        entryKind === "repayment" ? "Pick an account to credit" : "Pick a payment source",
+      );
+    const name = person.trim();
+    if (entryKind === "expense") {
+      if (!categoryId) return toast.error("Pick a category");
+    } else if (!name) {
+      return toast.error(entryKind === "lent" ? "Who did you pay for?" : "Who repaid you?");
+    }
     logMut.mutate({
       amount: n,
-      kind: "expense",
-      account_id: activeAccountId,
-      category_id: categoryId,
+      kind: entryKind,
+      account_id: effectiveAccountId,
+      category_id: entryKind === "expense" ? categoryId : null,
+      person: entryKind === "expense" ? null : name,
       note: noteOpen && note.trim() ? note.trim() : null,
       occurred_at: dateOpen ? dateInputToISO(dateStr) : undefined,
     });
@@ -225,7 +305,12 @@ function Journal() {
     [categories],
   );
   const filteredTxns = useMemo(
-    () => (filterAccountId ? transactions.filter((t) => t.account_id === filterAccountId || t.linked_account_id === filterAccountId) : transactions),
+    () =>
+      filterAccountId
+        ? transactions.filter(
+            (t) => t.account_id === filterAccountId || t.linked_account_id === filterAccountId,
+          )
+        : transactions,
     [transactions, filterAccountId],
   );
 
@@ -234,7 +319,24 @@ function Journal() {
       {/* Quick add */}
       <section>
         <div className="rounded-xl border border-border/70 bg-surface px-4 py-5 md:px-6 md:py-10">
-          <div className="flex items-baseline justify-center gap-1">
+          {/* Entry kind — expenses vs money moved on someone else's behalf */}
+          <div className="flex justify-center gap-1">
+            {(["expense", "lent", "repayment"] as const).map((k) => (
+              <button
+                key={k}
+                onClick={() => selectEntryKind(k)}
+                className={`h-7 px-3.5 rounded-full text-xs border transition-colors ${
+                  entryKind === k
+                    ? "bg-foreground text-background border-foreground"
+                    : "border-border text-muted-foreground hover:text-foreground hover:border-foreground/30"
+                }`}
+              >
+                {k === "expense" ? "Expense" : k === "lent" ? "Lent" : "Repaid"}
+              </button>
+            ))}
+          </div>
+
+          <div className="mt-4 flex items-baseline justify-center gap-1">
             <span className="text-3xl md:text-5xl text-muted-foreground/60 tnum">₹</span>
             <input
               ref={amountRef}
@@ -249,77 +351,121 @@ function Journal() {
             />
           </div>
 
-          {/* Categories */}
-          <div className="mt-5 md:mt-8 -mx-2 overflow-x-auto scrollbar-none">
-            <div className="flex gap-2 px-2 pb-1">
-              {categories.map((c) => (
-                <div key={c.id} className="relative shrink-0">
-                  <Chip
-                    active={categoryId === c.id}
-                    danger={manageCats && confirmCatId === c.id}
-                    onClick={() => handleCategoryClick(c.id)}
+          {/* Categories (expenses) or person (settlements) */}
+          {entryKind === "expense" ? (
+            <>
+              <div className="mt-5 md:mt-8 -mx-2 overflow-x-auto scrollbar-none">
+                <div className="flex gap-2 px-2 pb-1">
+                  {categories.map((c) => (
+                    <div key={c.id} className="relative shrink-0">
+                      <Chip
+                        active={categoryId === c.id}
+                        danger={manageCats && confirmCatId === c.id}
+                        onClick={() => handleCategoryClick(c.id)}
+                      >
+                        <span className={manageCats ? "pr-4" : ""}>
+                          {manageCats && confirmCatId === c.id ? "Confirm?" : c.name}
+                        </span>
+                      </Chip>
+                      {manageCats && confirmCatId !== c.id && (
+                        <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-destructive">
+                          <X className="size-3.5" />
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                  <button
+                    onClick={() => setShowAddCat(true)}
+                    className="shrink-0 h-9 w-9 grid place-items-center rounded-lg border border-border text-muted-foreground hover:text-foreground hover:border-primary/60 transition-colors"
+                    aria-label="Add category"
                   >
-                    <span className={manageCats ? "pr-4" : ""}>
-                      {manageCats && confirmCatId === c.id ? "Confirm?" : c.name}
-                    </span>
-                  </Chip>
-                  {manageCats && confirmCatId !== c.id && (
-                    <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-destructive">
-                      <X className="size-3.5" />
-                    </span>
-                  )}
+                    <Plus className="size-4" />
+                  </button>
+                  <button
+                    onClick={() => {
+                      setManageCats((v) => !v);
+                      setConfirmCatId(null);
+                    }}
+                    className={`shrink-0 h-9 w-9 grid place-items-center rounded-lg border transition-colors ${
+                      manageCats
+                        ? "border-destructive/60 text-destructive"
+                        : "border-border text-muted-foreground hover:text-foreground hover:border-foreground/40"
+                    }`}
+                    aria-label={manageCats ? "Done managing categories" : "Manage categories"}
+                  >
+                    {manageCats ? <X className="size-4" /> : <Pencil className="size-3.5" />}
+                  </button>
                 </div>
-              ))}
-              <button
-                onClick={() => setShowAddCat(true)}
-                className="shrink-0 h-9 w-9 grid place-items-center rounded-lg border border-border text-muted-foreground hover:text-foreground hover:border-primary/60 transition-colors"
-                aria-label="Add category"
-              >
-                <Plus className="size-4" />
-              </button>
-              <button
-                onClick={() => {
-                  setManageCats((v) => !v);
-                  setConfirmCatId(null);
-                }}
-                className={`shrink-0 h-9 w-9 grid place-items-center rounded-lg border transition-colors ${
-                  manageCats
-                    ? "border-destructive/60 text-destructive"
-                    : "border-border text-muted-foreground hover:text-foreground hover:border-foreground/40"
-                }`}
-                aria-label={manageCats ? "Done managing categories" : "Manage categories"}
-              >
-                {manageCats ? <X className="size-4" /> : <Pencil className="size-3.5" />}
-              </button>
-            </div>
-          </div>
+              </div>
 
-          {showAddCat && (
-            <div className="mt-3 flex items-center gap-2">
+              {showAddCat && (
+                <div className="mt-3 flex items-center gap-2">
+                  <input
+                    autoFocus
+                    value={newCat}
+                    onChange={(e) => setNewCat(e.target.value)}
+                    onKeyDown={(e) =>
+                      e.key === "Enter" && newCat.trim() && addCatMut.mutate(newCat.trim())
+                    }
+                    placeholder="New category"
+                    className="flex-1 h-9 px-3 rounded-md bg-muted/50 border border-border text-sm outline-none focus:border-primary"
+                  />
+                  <button
+                    onClick={() => setShowAddCat(false)}
+                    className="h-9 w-9 grid place-items-center rounded-md text-muted-foreground hover:text-foreground"
+                  >
+                    <X className="size-4" />
+                  </button>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="mt-5 md:mt-8">
               <input
                 autoFocus
-                value={newCat}
-                onChange={(e) => setNewCat(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && newCat.trim() && addCatMut.mutate(newCat.trim())}
-                placeholder="New category"
-                className="flex-1 h-9 px-3 rounded-md bg-muted/50 border border-border text-sm outline-none focus:border-primary"
+                value={person}
+                onChange={(e) => setPerson(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && submit()}
+                placeholder={entryKind === "lent" ? "Paid for whom?" : "Received from whom?"}
+                aria-label="Person"
+                className="w-full h-10 px-3 rounded-md bg-muted/50 border border-border text-sm text-center outline-none focus:border-primary"
               />
-              <button
-                onClick={() => setShowAddCat(false)}
-                className="h-9 w-9 grid place-items-center rounded-md text-muted-foreground hover:text-foreground"
-              >
-                <X className="size-4" />
-              </button>
+              {personSuggestions.length > 0 && (
+                <div className="mt-2 flex flex-wrap justify-center gap-1.5">
+                  {personSuggestions.map((p) => (
+                    <button
+                      key={p.name}
+                      onClick={() => pickPerson(p.name)}
+                      className={`h-7 px-2.5 rounded-full text-xs border transition-colors ${
+                        p.outstanding > 0
+                          ? "border-primary/40 text-foreground hover:border-primary"
+                          : "border-border text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {p.name}
+                      {entryKind === "repayment" &&
+                        p.outstanding > 0 &&
+                        ` · ${formatINR(p.outstanding)}`}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
-          {/* Payment source */}
+          {/* Payment source (or credited account for repayments) */}
           <div className="mt-4 md:mt-6 flex flex-wrap gap-2">
-            {accounts.map((a) => (
-              <Chip key={a.id} active={activeAccountId === a.id} onClick={() => selectAccount(a.id)}>
-                {a.name}
-              </Chip>
-            ))}
+            {accounts
+              .filter((a) => entryKind !== "repayment" || a.kind === "bank")
+              .map((a) => (
+                <Chip
+                  key={a.id}
+                  active={effectiveAccountId === a.id}
+                  onClick={() => selectAccount(a.id)}
+                >
+                  {a.name}
+                </Chip>
+              ))}
           </div>
 
           {/* Optional, collapsed by default so the fast path never grows */}
@@ -328,7 +474,9 @@ function Journal() {
               type="button"
               onClick={() => setNoteOpen((v) => !v)}
               className={`shrink-0 h-7 px-2.5 inline-flex items-center gap-1.5 rounded-full text-xs border transition-colors ${
-                noteOpen ? "border-primary/60 text-foreground" : "border-border text-muted-foreground hover:text-foreground"
+                noteOpen
+                  ? "border-primary/60 text-foreground"
+                  : "border-border text-muted-foreground hover:text-foreground"
               }`}
             >
               <StickyNote className="size-3" /> Note
@@ -337,7 +485,9 @@ function Journal() {
               type="button"
               onClick={() => setDateOpen((v) => !v)}
               className={`shrink-0 h-7 px-2.5 inline-flex items-center gap-1.5 rounded-full text-xs border transition-colors ${
-                dateOpen ? "border-primary/60 text-foreground" : "border-border text-muted-foreground hover:text-foreground"
+                dateOpen
+                  ? "border-primary/60 text-foreground"
+                  : "border-border text-muted-foreground hover:text-foreground"
               }`}
             >
               <CalendarDays className="size-3" /> {dateOpen ? "Backdated" : "Today"}
@@ -369,7 +519,13 @@ function Journal() {
             disabled={logMut.isPending}
             className="mt-5 md:mt-8 w-full h-11 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-60 transition-opacity active:scale-[0.99]"
           >
-            {logMut.isPending ? "Logging…" : "Log expense"}
+            {logMut.isPending
+              ? "Logging…"
+              : entryKind === "expense"
+                ? "Log expense"
+                : entryKind === "lent"
+                  ? "Log lent"
+                  : "Log repayment"}
           </button>
         </div>
       </section>
@@ -377,7 +533,9 @@ function Journal() {
       {/* Ledger */}
       <section>
         <div className="flex items-baseline justify-between mb-3">
-          <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Recent</h2>
+          <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
+            Recent
+          </h2>
           <span className="text-xs text-muted-foreground tnum">
             {filteredTxns.length} of {transactions.length}
           </span>
@@ -388,7 +546,11 @@ function Journal() {
               All
             </FilterChip>
             {accounts.map((a) => (
-              <FilterChip key={a.id} active={filterAccountId === a.id} onClick={() => setFilterAccountId(a.id)}>
+              <FilterChip
+                key={a.id}
+                active={filterAccountId === a.id}
+                onClick={() => setFilterAccountId(a.id)}
+              >
                 {a.name}
               </FilterChip>
             ))}
@@ -398,15 +560,18 @@ function Journal() {
           {filteredTxns.map((t) => {
             const acc = accountsById[t.account_id];
             const catName = t.category_id ? catsById[t.category_id] : null;
-            const isCredit = t.kind === "salary";
-            const isExpense = t.kind === "expense";
-            const isUncategorized = isExpense && !t.category_id;
+            const isCredit = t.kind === "salary" || t.kind === "repayment";
+            const isUncategorized = t.kind === "expense" && !t.category_id;
             const label =
               t.kind === "salary"
-                ? catName ?? "Salary"
+                ? (catName ?? "Salary")
                 : t.kind === "card_payment"
-                ? `Payment → ${t.linked_account_id ? accountsById[t.linked_account_id]?.name : "Card"}`
-                : catName ?? "Uncategorized";
+                  ? `Payment → ${t.linked_account_id ? accountsById[t.linked_account_id]?.name : "Card"}`
+                  : t.kind === "lent"
+                    ? `Lent · ${t.person ?? "?"}`
+                    : t.kind === "repayment"
+                      ? `${t.person ?? "?"} repaid`
+                      : (catName ?? "Uncategorized");
             return (
               <li
                 key={t.id}
@@ -418,17 +583,29 @@ function Journal() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-1.5 text-sm font-medium truncate">
                     {isUncategorized && (
-                      <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
+                      <span
+                        className="size-1.5 shrink-0 rounded-full bg-primary"
+                        aria-hidden="true"
+                      />
                     )}
-                    <span className={`truncate ${isUncategorized ? "text-muted-foreground" : ""}`}>{label}</span>
+                    <span className={`truncate ${isUncategorized ? "text-muted-foreground" : ""}`}>
+                      {label}
+                    </span>
                   </div>
                   <div className="text-xs text-muted-foreground truncate">
                     {acc?.name}
-                    {t.note ? ` · ${t.note}` : ""} · {new Date(t.occurred_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+                    {t.note ? ` · ${t.note}` : ""} ·{" "}
+                    {new Date(t.occurred_at).toLocaleDateString("en-IN", {
+                      day: "numeric",
+                      month: "short",
+                    })}
                   </div>
                 </div>
-                <div className={`tnum text-sm font-medium ${isCredit ? "text-[color:var(--success)]" : "text-foreground"}`}>
-                  {isCredit ? "+" : "−"}{formatINR(Number(t.amount))}
+                <div
+                  className={`tnum text-sm font-medium ${isCredit ? "text-[color:var(--success)]" : "text-foreground"}`}
+                >
+                  {isCredit ? "+" : "−"}
+                  {formatINR(Number(t.amount))}
                 </div>
                 <button
                   onClick={(e) => {
@@ -458,11 +635,14 @@ function Journal() {
           txn={editingTxn}
           accounts={accounts}
           categories={categories}
+          outstanding={
+            editingTxn.person ? outstandingByPerson[editingTxn.person.toLowerCase()] : undefined
+          }
           onClose={() => setEditingTxn(null)}
           onSave={(updates) => editMut.mutate({ original: editingTxn, ...updates })}
           onDelete={() => handleDelete(editingTxn)}
           onNet={
-            editingTxn.kind === "card_payment"
+            editingTxn.kind === "card_payment" || isSettlement(editingTxn.kind)
               ? undefined
               : () => {
                   setNettingTxn(editingTxn);
@@ -477,7 +657,11 @@ function Journal() {
         <NetModal
           primary={nettingTxn}
           candidates={transactions.filter(
-            (t) => t.account_id === nettingTxn.account_id && t.id !== nettingTxn.id && t.kind !== "card_payment",
+            (t) =>
+              t.account_id === nettingTxn.account_id &&
+              t.id !== nettingTxn.id &&
+              t.kind !== "card_payment" &&
+              !isSettlement(t.kind),
           )}
           categories={categories}
           onClose={() => setNettingTxn(null)}
@@ -493,6 +677,7 @@ function EditTransactionModal({
   txn,
   accounts,
   categories,
+  outstanding,
   onClose,
   onSave,
   onDelete,
@@ -502,23 +687,37 @@ function EditTransactionModal({
   txn: Transaction;
   accounts: Account[];
   categories: { id: string; name: string }[];
+  outstanding?: number;
   onClose: () => void;
   onSave: (updates: {
     amount: number;
+    kind: TransactionKind;
     category_id: string | null;
     account_id: string;
     linked_account_id: string | null;
     note: string | null;
+    person: string | null;
     occurred_at: string;
   }) => void;
   onDelete: () => void;
   onNet?: () => void;
   saving: boolean;
 }) {
-  const isCardPayment = txn.kind === "card_payment";
-  // Salary/card-payment can only source from a bank account (the RPC
-  // enforces this); expense can come from any account.
-  const sourceAccounts = txn.kind === "expense" ? accounts : accounts.filter((a) => a.kind === "bank");
+  // Kind is editable so mistakes and auto-imports can be corrected in place:
+  // an expense that was actually for someone else converts to a lent entry,
+  // an auto-imported credit that was actually someone repaying converts to a
+  // repayment — without delete-and-re-enter. card_payment stays fixed.
+  const [kind, setKind] = useState<TransactionKind>(txn.kind);
+  const isCardPayment = kind === "card_payment";
+  const isSettle = isSettlement(kind);
+  const changedKind = kind !== txn.kind;
+
+  // Salary/repayment/card-payment sources must be bank accounts (the RPC
+  // enforces this); expense/lent can come from any account.
+  const sourceAccounts =
+    isCardPayment || kind === "salary" || kind === "repayment"
+      ? accounts.filter((a) => a.kind === "bank")
+      : accounts;
   const cardAccounts = accounts.filter((a) => a.kind === "credit_card");
 
   const [amount, setAmount] = useState(String(Number(txn.amount)));
@@ -526,34 +725,69 @@ function EditTransactionModal({
   const [accountId, setAccountId] = useState(txn.account_id);
   const [linkedAccountId, setLinkedAccountId] = useState(txn.linked_account_id);
   const [note, setNote] = useState(txn.note ?? "");
+  const [person, setPerson] = useState(txn.person ?? "");
   const [dateStr, setDateStr] = useState(isoToDateInput(txn.occurred_at));
+
+  // If the source no longer allows the current account after conversion
+  // (e.g. salary → repayment keeps bank anyway; expense → repayment from a
+  // card), snap to the first valid one.
+  useEffect(() => {
+    const src = accounts.find((a) => a.id === accountId);
+    if (!src) return;
+    if (
+      (kind === "salary" || kind === "repayment") &&
+      src.kind !== "bank" &&
+      accounts.some((a) => a.kind === "bank")
+    ) {
+      setAccountId(accounts.find((a) => a.kind === "bank")!.id);
+    }
+  }, [kind, accountId, accounts]);
 
   function save() {
     const n = Number(amount);
     if (!n || n <= 0) return toast.error("Enter an amount");
-    if (txn.kind === "expense" && !categoryId) return toast.error("Pick a category");
+    if (kind === "expense" && !categoryId) return toast.error("Pick a category");
+    if (isSettle && !person.trim()) return toast.error("Who is it?");
     if (isCardPayment && !linkedAccountId) return toast.error("Pick a card");
     onSave({
       amount: n,
-      category_id: isCardPayment ? null : categoryId,
+      kind,
+      category_id: kind === "expense" ? categoryId : null,
       account_id: accountId,
       linked_account_id: isCardPayment ? linkedAccountId : null,
       note: note.trim() || null,
+      person: isSettle ? person.trim() : null,
       occurred_at: dateInputToISO(dateStr, new Date(txn.occurred_at)),
     });
   }
 
-  const title = txn.kind === "expense" ? "Edit expense" : txn.kind === "salary" ? "Edit income" : "Edit card payment";
+  const title =
+    kind === "expense"
+      ? "Edit expense"
+      : kind === "salary"
+        ? "Edit income"
+        : kind === "lent"
+          ? "Edit lent"
+          : kind === "repayment"
+            ? "Edit repayment"
+            : "Edit card payment";
 
   return (
-    <div className="fixed inset-0 z-40 flex items-end md:items-center justify-center bg-background/70 backdrop-blur-sm px-0 md:px-4" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-40 flex items-end md:items-center justify-center bg-background/70 backdrop-blur-sm px-0 md:px-4"
+      onClick={onClose}
+    >
       <div
         className="w-full md:max-w-md rounded-t-2xl md:rounded-xl border border-border bg-surface p-5 md:p-6 pb-[calc(env(safe-area-inset-bottom)+1.25rem)] md:pb-6"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-4">
           <p className="text-sm font-medium">{title}</p>
-          <button onClick={onClose} aria-label="Close" className="text-muted-foreground hover:text-foreground">
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="text-muted-foreground hover:text-foreground"
+          >
             <X className="size-4" />
           </button>
         </div>
@@ -570,16 +804,79 @@ function EditTransactionModal({
           />
         </div>
 
+        {(txn.kind === "expense" || txn.kind === "lent") && (
+          <div className="mb-4 text-center">
+            {txn.kind === "expense" ? (
+              <button
+                onClick={() => setKind("lent")}
+                className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+              >
+                Paid for someone else?
+              </button>
+            ) : (
+              <button
+                onClick={() => setKind("expense")}
+                className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+              >
+                This was my own expense
+              </button>
+            )}
+          </div>
+        )}
+        {(txn.kind === "salary" || txn.kind === "repayment") && (
+          <div className="mb-4 text-center">
+            {txn.kind === "salary" ? (
+              <button
+                onClick={() => setKind("repayment")}
+                className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+              >
+                Someone was repaying me
+              </button>
+            ) : (
+              <button
+                onClick={() => setKind("salary")}
+                className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+              >
+                This was income
+              </button>
+            )}
+          </div>
+        )}
+
         {isCardPayment ? (
           <div className="mb-1">
             <p className="text-xs text-muted-foreground mb-2">Paying which card?</p>
             <div className="flex flex-wrap gap-2 mb-4">
               {cardAccounts.map((a) => (
-                <Chip key={a.id} active={linkedAccountId === a.id} onClick={() => setLinkedAccountId(a.id)}>
+                <Chip
+                  key={a.id}
+                  active={linkedAccountId === a.id}
+                  onClick={() => setLinkedAccountId(a.id)}
+                >
                   {a.name}
                 </Chip>
               ))}
             </div>
+          </div>
+        ) : isSettle ? (
+          <div className="mb-4">
+            <input
+              autoFocus={changedKind}
+              value={person}
+              onChange={(e) => setPerson(e.target.value)}
+              placeholder={kind === "lent" ? "Who did you pay for?" : "Who repaid you?"}
+              aria-label="Person"
+              className="w-full h-10 px-3 rounded-md bg-muted/50 border border-border text-sm outline-none focus:border-primary"
+            />
+            {outstanding != null && outstanding !== 0 && (
+              <p className="mt-1.5 text-[11px] text-muted-foreground tnum">
+                {person.trim() && person.toLowerCase() !== (txn.person ?? "").toLowerCase()
+                  ? null
+                  : outstanding > 0
+                    ? `Still owed ${formatINR(outstanding)}`
+                    : `${formatINR(Math.abs(outstanding))} overpaid`}
+              </p>
+            )}
           </div>
         ) : (
           <div className="-mx-1 overflow-x-auto scrollbar-none mb-3">
@@ -674,18 +971,27 @@ function NetModal({
 
   function pick(t: Transaction) {
     setPair(t);
-    setNote(`Netted: ${primary.note || formatINR(Number(primary.amount))} ↔ ${t.note || formatINR(Number(t.amount))}`);
+    setNote(
+      `Netted: ${primary.note || formatINR(Number(primary.amount))} ↔ ${t.note || formatINR(Number(t.amount))}`,
+    );
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex items-end md:items-center justify-center bg-background/70 backdrop-blur-sm px-0 md:px-4" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-40 flex items-end md:items-center justify-center bg-background/70 backdrop-blur-sm px-0 md:px-4"
+      onClick={onClose}
+    >
       <div
         className="w-full md:max-w-md rounded-t-2xl md:rounded-xl border border-border bg-surface p-5 md:p-6 pb-[calc(env(safe-area-inset-bottom)+1.25rem)] md:pb-6"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-4">
           <p className="text-sm font-medium">{pair ? "Confirm net" : "Net against…"}</p>
-          <button onClick={onClose} aria-label="Close" className="text-muted-foreground hover:text-foreground">
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="text-muted-foreground hover:text-foreground"
+          >
             <X className="size-4" />
           </button>
         </div>
@@ -693,7 +999,8 @@ function NetModal({
         {!pair ? (
           <>
             <p className="text-xs text-muted-foreground mb-3">
-              Pick the entry on the same account to net {primary.note || formatINR(Number(primary.amount))} against.
+              Pick the entry on the same account to net{" "}
+              {primary.note || formatINR(Number(primary.amount))} against.
             </p>
             <ul className="max-h-[50vh] overflow-y-auto divide-y divide-border/60 -mx-1">
               {candidates.map((t) => (
@@ -702,8 +1009,12 @@ function NetModal({
                     onClick={() => pick(t)}
                     className="w-full flex items-center justify-between gap-3 py-3 px-1 text-left hover:bg-muted/40 rounded-md transition-colors"
                   >
-                    <span className="text-sm truncate">{t.note || (t.kind === "salary" ? "Income" : "Expense")}</span>
-                    <span className={`tnum text-sm shrink-0 ${t.kind === "salary" ? "text-[color:var(--success)]" : ""}`}>
+                    <span className="text-sm truncate">
+                      {t.note || (t.kind === "salary" ? "Income" : "Expense")}
+                    </span>
+                    <span
+                      className={`tnum text-sm shrink-0 ${t.kind === "salary" ? "text-[color:var(--success)]" : ""}`}
+                    >
                       {t.kind === "salary" ? "+" : "−"}
                       {formatINR(Number(t.amount))}
                     </span>
@@ -721,17 +1032,27 @@ function NetModal({
           <>
             <div className="mb-4 rounded-lg border border-border bg-muted/30 p-3 text-sm">
               <div className="flex items-center justify-between text-muted-foreground">
-                <span className="truncate">{primary.note || formatINR(Number(primary.amount))}</span>
-                <span className="tnum shrink-0">{primary.kind === "salary" ? "+" : "−"}{formatINR(Number(primary.amount))}</span>
+                <span className="truncate">
+                  {primary.note || formatINR(Number(primary.amount))}
+                </span>
+                <span className="tnum shrink-0">
+                  {primary.kind === "salary" ? "+" : "−"}
+                  {formatINR(Number(primary.amount))}
+                </span>
               </div>
               <div className="flex items-center justify-between text-muted-foreground mt-1">
                 <span className="truncate">{pair.note || formatINR(Number(pair.amount))}</span>
-                <span className="tnum shrink-0">{pair.kind === "salary" ? "+" : "−"}{formatINR(Number(pair.amount))}</span>
+                <span className="tnum shrink-0">
+                  {pair.kind === "salary" ? "+" : "−"}
+                  {formatINR(Number(pair.amount))}
+                </span>
               </div>
               <div className="flex items-center justify-between mt-2 pt-2 border-t border-border font-medium">
                 <span>{resultKind ? "Results in" : "Cancels out exactly"}</span>
                 {resultKind && (
-                  <span className={`tnum ${resultKind === "credit" ? "text-[color:var(--success)]" : ""}`}>
+                  <span
+                    className={`tnum ${resultKind === "credit" ? "text-[color:var(--success)]" : ""}`}
+                  >
                     {resultKind === "credit" ? "+" : "−"}
                     {formatINR(Math.abs(net))}
                   </span>
@@ -744,7 +1065,11 @@ function NetModal({
                 <div className="-mx-1 overflow-x-auto scrollbar-none mb-3">
                   <div className="flex gap-2 px-1 pb-1">
                     {categories.map((c) => (
-                      <Chip key={c.id} active={categoryId === c.id} onClick={() => setCategoryId(c.id)}>
+                      <Chip
+                        key={c.id}
+                        active={categoryId === c.id}
+                        onClick={() => setCategoryId(c.id)}
+                      >
                         {c.name}
                       </Chip>
                     ))}
@@ -767,7 +1092,9 @@ function NetModal({
                 Back
               </button>
               <button
-                onClick={() => onConfirm(pair, { category_id: categoryId, note: note.trim() || null })}
+                onClick={() =>
+                  onConfirm(pair, { category_id: categoryId, note: note.trim() || null })
+                }
                 disabled={netting}
                 className="flex-1 h-10 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-60 transition-opacity"
               >
@@ -822,8 +1149,8 @@ function Chip({
         danger
           ? "bg-destructive text-destructive-foreground border-destructive"
           : active
-          ? "bg-primary text-primary-foreground border-primary"
-          : "border-border text-muted-foreground hover:text-foreground hover:border-foreground/30"
+            ? "bg-primary text-primary-foreground border-primary"
+            : "border-border text-muted-foreground hover:text-foreground hover:border-foreground/30"
       }`}
     >
       {children}

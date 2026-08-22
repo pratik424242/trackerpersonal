@@ -7,8 +7,11 @@ import {
   categoriesQuery,
   formatINR,
   monthTransactionsQuery,
+  receivablesByPerson,
+  receivablesQuery,
   spendingLimitsQuery,
   upsertLimit,
+  type Receivable,
 } from "@/lib/finance";
 import { useTheme } from "@/components/theme-provider";
 
@@ -24,6 +27,7 @@ export const Route = createFileRoute("/insights")({
       context.queryClient.ensureQueryData(categoriesQuery),
       context.queryClient.ensureQueryData(spendingLimitsQuery),
       context.queryClient.ensureQueryData(monthTransactionsQuery(new Date())),
+      context.queryClient.ensureQueryData(receivablesQuery),
     ]),
   component: InsightsPage,
 });
@@ -68,20 +72,33 @@ function InsightsPage() {
   const { data: limits = [] } = useQuery(spendingLimitsQuery);
   const { data: thisMonth = [], isLoading: loadingThis } = useQuery(monthTransactionsQuery(som));
   const { data: lastMonth = [] } = useQuery(monthTransactionsQuery(soLastMonth));
+  // Settlements (lent/repayment) live outside the month window on purpose:
+  // receivables are all-time balances, not month-scoped flows.
+  const { data: settlements = [] } = useQuery(receivablesQuery);
 
-  const monthSpend = thisMonth.filter((t) => t.kind === "expense").reduce((s, t) => s + Number(t.amount), 0);
-  const monthIncome = thisMonth.filter((t) => t.kind === "salary").reduce((s, t) => s + Number(t.amount), 0);
-  const lastMonthSpend = lastMonth.filter((t) => t.kind === "expense").reduce((s, t) => s + Number(t.amount), 0);
+  const monthSpend = thisMonth
+    .filter((t) => t.kind === "expense")
+    .reduce((s, t) => s + Number(t.amount), 0);
+  const monthIncome = thisMonth
+    .filter((t) => t.kind === "salary")
+    .reduce((s, t) => s + Number(t.amount), 0);
+  const lastMonthSpend = lastMonth
+    .filter((t) => t.kind === "expense")
+    .reduce((s, t) => s + Number(t.amount), 0);
   const savings = monthIncome - monthSpend;
 
   const today = new Date();
-  const dayOfMonth = isCurrentMonth ? today.getDate() : new Date(som.getFullYear(), som.getMonth() + 1, 0).getDate();
+  const dayOfMonth = isCurrentMonth
+    ? today.getDate()
+    : new Date(som.getFullYear(), som.getMonth() + 1, 0).getDate();
   const daysInLastMonth = new Date(som.getFullYear(), som.getMonth(), 0).getDate();
   const avgPerDay = dayOfMonth > 0 ? monthSpend / dayOfMonth : 0;
   const lastAvgPerDay = lastMonthSpend / daysInLastMonth;
   const pace =
     isCurrentMonth && lastMonthSpend > 0
-      ? ((monthSpend - (lastMonthSpend * dayOfMonth) / daysInLastMonth) / ((lastMonthSpend * dayOfMonth) / daysInLastMonth)) * 100
+      ? ((monthSpend - (lastMonthSpend * dayOfMonth) / daysInLastMonth) /
+          ((lastMonthSpend * dayOfMonth) / daysInLastMonth)) *
+        100
       : 0;
 
   const byCategory = useMemo(() => {
@@ -126,7 +143,8 @@ function InsightsPage() {
     let total = 0;
     let daysUnder = 0;
     for (let d = 1; d <= daysTracked; d++) {
-      const spend = spendByDay.get(new Date(som.getFullYear(), som.getMonth(), d).toDateString()) ?? 0;
+      const spend =
+        spendByDay.get(new Date(som.getFullYear(), som.getMonth(), d).toDateString()) ?? 0;
       total += FOOD_DAILY_BUDGET - spend;
       if (spend <= FOOD_DAILY_BUDGET) daysUnder++;
     }
@@ -176,7 +194,9 @@ function InsightsPage() {
         </div>
         <div className="mt-3 rounded-xl border border-border/70 bg-surface p-4 md:p-5">
           <p className="text-xs uppercase tracking-wider text-muted-foreground">Savings margin</p>
-          <p className={`tnum mt-2 text-2xl md:text-3xl font-semibold ${savings < 0 ? "text-destructive" : "text-[color:var(--success)]"}`}>
+          <p
+            className={`tnum mt-2 text-2xl md:text-3xl font-semibold ${savings < 0 ? "text-destructive" : "text-[color:var(--success)]"}`}
+          >
             {formatINR(savings, { sign: true })}
           </p>
           {monthIncome > 0 && (
@@ -189,7 +209,9 @@ function InsightsPage() {
 
       {foodBudget && (
         <section>
-          <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-3">Food budget</h2>
+          <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-3">
+            Food budget
+          </h2>
           <div className="rounded-xl border border-border/70 bg-surface p-4 md:p-5">
             <p className="text-xs uppercase tracking-wider text-muted-foreground">
               {isCurrentMonth ? "Saved so far" : "Saved"}
@@ -202,12 +224,14 @@ function InsightsPage() {
               {formatINR(foodBudget.total, { sign: true })}
             </p>
             <p className="mt-1 text-xs text-muted-foreground tnum">
-              ₹{FOOD_DAILY_BUDGET}/day · Outside Food + Office Food · {foodBudget.daysUnder} of {foodBudget.daysTracked}{" "}
-              days under budget
+              ₹{FOOD_DAILY_BUDGET}/day · Outside Food + Office Food · {foodBudget.daysUnder} of{" "}
+              {foodBudget.daysTracked} days under budget
             </p>
           </div>
         </section>
       )}
+
+      <SettlementsSection settlements={settlements} monthTxns={thisMonth} monthName={monthName} />
 
       <section>
         <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-3">
@@ -217,13 +241,18 @@ function InsightsPage() {
           <div className="flex items-baseline justify-between">
             <div>
               <p className="text-xs uppercase tracking-wider text-muted-foreground">Spend delta</p>
-              <p className={`tnum mt-1 text-2xl font-semibold ${spendDelta > 0 ? "text-destructive" : "text-[color:var(--success)]"}`}>
+              <p
+                className={`tnum mt-1 text-2xl font-semibold ${spendDelta > 0 ? "text-destructive" : "text-[color:var(--success)]"}`}
+              >
                 {formatINR(spendDelta, { sign: true })}
               </p>
             </div>
             {lastMonthSpend > 0 && (
-              <span className={`tnum text-sm ${spendDelta > 0 ? "text-destructive" : "text-[color:var(--success)]"}`}>
-                {spendDeltaPct > 0 ? "+" : ""}{spendDeltaPct.toFixed(1)}%
+              <span
+                className={`tnum text-sm ${spendDelta > 0 ? "text-destructive" : "text-[color:var(--success)]"}`}
+              >
+                {spendDeltaPct > 0 ? "+" : ""}
+                {spendDeltaPct.toFixed(1)}%
               </span>
             )}
           </div>
@@ -231,12 +260,18 @@ function InsightsPage() {
             <div>
               <p className="text-xs uppercase tracking-wider text-muted-foreground">Avg / day</p>
               <p className="tnum mt-1 text-lg font-medium">{formatINR(avgPerDay)}</p>
-              <p className="tnum mt-0.5 text-xs text-muted-foreground">was {formatINR(lastAvgPerDay)}</p>
+              <p className="tnum mt-0.5 text-xs text-muted-foreground">
+                was {formatINR(lastAvgPerDay)}
+              </p>
             </div>
             <div>
               <p className="text-xs uppercase tracking-wider text-muted-foreground">Pace</p>
-              <p className={`tnum mt-1 text-lg font-medium ${pace > 0 ? "text-destructive" : "text-[color:var(--success)]"}`}>
-                {isCurrentMonth && lastMonthSpend > 0 ? `${pace > 0 ? "+" : ""}${pace.toFixed(0)}%` : "—"}
+              <p
+                className={`tnum mt-1 text-lg font-medium ${pace > 0 ? "text-destructive" : "text-[color:var(--success)]"}`}
+              >
+                {isCurrentMonth && lastMonthSpend > 0
+                  ? `${pace > 0 ? "+" : ""}${pace.toFixed(0)}%`
+                  : "—"}
               </p>
               <p className="mt-0.5 text-xs text-muted-foreground">
                 {isCurrentMonth ? "vs same day last month" : "current month only"}
@@ -246,10 +281,18 @@ function InsightsPage() {
         </div>
       </section>
 
-      <CalendarSection key={som.toISOString()} transactions={thisMonth} categories={categories} som={som} monthName={monthName} />
+      <CalendarSection
+        key={som.toISOString()}
+        transactions={thisMonth}
+        categories={categories}
+        som={som}
+        monthName={monthName}
+      />
 
       <section>
-        <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-4">By category</h2>
+        <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-4">
+          By category
+        </h2>
         {rows.length === 0 ? (
           <div className="py-6 flex flex-col items-center gap-2 text-center text-sm text-muted-foreground">
             <Inbox className="size-5 text-muted-foreground/50" aria-hidden="true" />
@@ -302,7 +345,9 @@ function CategoryProportionBar({
       amount: r.spent,
       color: CATEGORY_COLORS[r.c.name] ?? OTHER_COLOR,
     })),
-    ...(otherTotal > 0 ? [{ key: "__other", name: "Other", amount: otherTotal, color: OTHER_COLOR }] : []),
+    ...(otherTotal > 0
+      ? [{ key: "__other", name: "Other", amount: otherTotal, color: OTHER_COLOR }]
+      : []),
   ];
 
   if (segments.length === 0 || totalSpend <= 0) return null;
@@ -317,7 +362,9 @@ function CategoryProportionBar({
               width: `${(s.amount / totalSpend) * 100}%`,
               backgroundColor: isDark ? s.color.dark : s.color.light,
             }}
-            className={i === 0 ? "rounded-l-full" : i === segments.length - 1 ? "rounded-r-full" : ""}
+            className={
+              i === 0 ? "rounded-l-full" : i === segments.length - 1 ? "rounded-r-full" : ""
+            }
           />
         ))}
       </div>
@@ -348,6 +395,73 @@ function Metric({ label, value, loading }: { label: string; value: string; loadi
         <p className="tnum mt-2 text-xl md:text-2xl font-semibold">{value}</p>
       )}
     </div>
+  );
+}
+
+// Who still owes what. Settlement entries never touch Spent/Earned above —
+// this section is where they surface instead, as all-time receivables per
+// person plus this month's settlement flow. Hidden entirely until the first
+// settlement exists so it costs nothing on an empty ledger.
+function SettlementsSection({
+  settlements,
+  monthTxns,
+  monthName,
+}: {
+  settlements: { kind: string; amount: number | string; person: string | null }[];
+  monthTxns: { kind: string; amount: number | string }[];
+  monthName: string;
+}) {
+  const people = useMemo<Receivable[]>(() => receivablesByPerson(settlements), [settlements]);
+
+  const openPeople = people.filter((p) => p.outstanding !== 0);
+  const totalOwed = openPeople.reduce((s, p) => s + Math.max(0, p.outstanding), 0);
+
+  if (settlements.length === 0) return null;
+
+  const lentThisMonth = monthTxns
+    .filter((t) => t.kind === "lent")
+    .reduce((s, t) => s + Number(t.amount), 0);
+  const repaidThisMonth = monthTxns
+    .filter((t) => t.kind === "repayment")
+    .reduce((s, t) => s + Number(t.amount), 0);
+
+  return (
+    <section>
+      <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-3">
+        Lent &amp; repaid
+      </h2>
+      <div className="rounded-xl border border-border/70 bg-surface p-4 md:p-5">
+        <div className="flex items-baseline justify-between gap-3">
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">Outstanding</p>
+          <p
+            className={`tnum text-2xl font-semibold ${totalOwed > 0 ? "" : "text-muted-foreground"}`}
+          >
+            {formatINR(totalOwed)}
+          </p>
+        </div>
+
+        {openPeople.length > 0 && (
+          <ul className="mt-4 divide-y divide-border/60">
+            {openPeople.map((p) => (
+              <li key={p.person} className="flex items-baseline justify-between gap-3 py-2">
+                <span className="text-sm truncate">{p.person}</span>
+                <span
+                  className={`tnum text-sm shrink-0 ${p.outstanding <= 0 ? "text-muted-foreground" : ""}`}
+                >
+                  {formatINR(p.outstanding)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {(lentThisMonth > 0 || repaidThisMonth > 0) && (
+          <p className="mt-3 pt-3 border-t border-border/50 text-xs text-muted-foreground tnum">
+            {monthName}: lent {formatINR(lentThisMonth)} · received {formatINR(repaidThisMonth)}
+          </p>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -397,11 +511,16 @@ function CategoryRow({
                 onKeyDown={(e) => e.key === "Enter" && mut.mutate()}
                 className="tnum w-20 bg-muted/50 border border-border rounded px-1.5 py-0.5 text-right text-xs outline-none focus:border-primary"
               />
-              <button onClick={() => mut.mutate()} className="text-xs text-primary">Save</button>
+              <button onClick={() => mut.mutate()} className="text-xs text-primary">
+                Save
+              </button>
             </>
           ) : (
             <button
-              onClick={() => { setVal(String(limit || "")); setEditing(true); }}
+              onClick={() => {
+                setVal(String(limit || ""));
+                setEditing(true);
+              }}
               className="tnum text-xs text-muted-foreground hover:text-foreground"
             >
               / {limit > 0 ? formatINR(limit) : "set limit"}
@@ -419,8 +538,13 @@ function CategoryRow({
         <p className="mt-1.5 text-[11px] text-muted-foreground tnum">
           last month {formatINR(lastSpent)}
           {spent > 0 && (
-            <span className={spent > lastSpent ? "text-destructive ml-1.5" : "text-[color:var(--success)] ml-1.5"}>
-              ({spent > lastSpent ? "+" : ""}{(((spent - lastSpent) / lastSpent) * 100).toFixed(0)}%)
+            <span
+              className={
+                spent > lastSpent ? "text-destructive ml-1.5" : "text-[color:var(--success)] ml-1.5"
+              }
+            >
+              ({spent > lastSpent ? "+" : ""}
+              {(((spent - lastSpent) / lastSpent) * 100).toFixed(0)}%)
             </span>
           )}
         </p>
@@ -429,7 +553,14 @@ function CategoryRow({
   );
 }
 
-type Txn = { id: string; amount: number | string; kind: string; category_id: string | null; occurred_at: string; note: string | null };
+type Txn = {
+  id: string;
+  amount: number | string;
+  kind: string;
+  category_id: string | null;
+  occurred_at: string;
+  note: string | null;
+};
 type Cat = { id: string; name: string };
 
 function CalendarSection({
@@ -468,7 +599,10 @@ function CalendarSection({
 
   const maxDay = Math.max(1, ...Array.from(byDay.values()).map((v) => v.total));
 
-  const initialSelected = som.getFullYear() === today.getFullYear() && som.getMonth() === today.getMonth() ? todayKey : null;
+  const initialSelected =
+    som.getFullYear() === today.getFullYear() && som.getMonth() === today.getMonth()
+      ? todayKey
+      : null;
   const [selectedKey, setSelectedKey] = useState<string | null>(initialSelected);
 
   const cells: (Date | null)[] = [];
@@ -487,18 +621,32 @@ function CalendarSection({
     if (r < 0.85) return 4;
     return 5;
   };
-  const bgClass = ["bg-muted/40", "bg-primary/15", "bg-primary/30", "bg-primary/50", "bg-primary/70", "bg-primary"];
+  const bgClass = [
+    "bg-muted/40",
+    "bg-primary/15",
+    "bg-primary/30",
+    "bg-primary/50",
+    "bg-primary/70",
+    "bg-primary",
+  ];
 
   return (
     <section>
       <div className="flex items-baseline justify-between mb-4">
-        <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Calendar</h2>
+        <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
+          Calendar
+        </h2>
         <span className="tnum text-xs text-muted-foreground">{monthName}</span>
       </div>
       <div className="rounded-xl border border-border/70 bg-surface p-4">
         <div className="grid grid-cols-7 gap-1 mb-2">
           {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
-            <div key={i} className="text-[10px] text-center uppercase tracking-wider text-muted-foreground">{d}</div>
+            <div
+              key={i}
+              className="text-[10px] text-center uppercase tracking-wider text-muted-foreground"
+            >
+              {d}
+            </div>
           ))}
         </div>
         <div className="grid grid-cols-7 gap-1">
@@ -522,12 +670,18 @@ function CalendarSection({
                   ${isToday && !isSelected ? "ring-1 ring-foreground/40" : ""}
                   hover:brightness-110`}
               >
-                <span className={`tnum text-[11px] leading-none ${level >= 4 ? "text-primary-foreground" : ""}`}>
+                <span
+                  className={`tnum text-[11px] leading-none ${level >= 4 ? "text-primary-foreground" : ""}`}
+                >
                   {date.getDate()}
                 </span>
                 {total > 0 && (
-                  <span className={`tnum text-[9px] leading-none ${level >= 4 ? "text-primary-foreground/90" : "text-muted-foreground"}`}>
-                    {total >= 1000 ? `${(total / 1000).toFixed(total >= 10000 ? 0 : 1)}k` : Math.round(total)}
+                  <span
+                    className={`tnum text-[9px] leading-none ${level >= 4 ? "text-primary-foreground/90" : "text-muted-foreground"}`}
+                  >
+                    {total >= 1000
+                      ? `${(total / 1000).toFixed(total >= 10000 ? 0 : 1)}k`
+                      : Math.round(total)}
                   </span>
                 )}
               </button>
@@ -539,7 +693,11 @@ function CalendarSection({
           <div className="mt-4 pt-4 border-t border-border/50">
             <div className="flex items-baseline justify-between mb-3">
               <p className="text-sm font-medium">
-                {selectedDate.toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })}
+                {selectedDate.toLocaleDateString("en-IN", {
+                  weekday: "long",
+                  day: "numeric",
+                  month: "long",
+                })}
               </p>
               <p className="tnum text-sm font-semibold">{formatINR(selectedEntry?.total ?? 0)}</p>
             </div>
@@ -549,12 +707,16 @@ function CalendarSection({
               <ul className="space-y-2">
                 {selectedEntry.items
                   .slice()
-                  .sort((a, b) => new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime())
+                  .sort(
+                    (a, b) => new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime(),
+                  )
                   .map((t) => (
                     <li key={t.id} className="flex items-baseline justify-between gap-3 text-sm">
                       <div className="min-w-0 flex-1">
                         <p className="truncate">
-                          {t.category_id ? catName[t.category_id] ?? "Uncategorized" : "Uncategorized"}
+                          {t.category_id
+                            ? (catName[t.category_id] ?? "Uncategorized")
+                            : "Uncategorized"}
                           {t.note && <span className="text-muted-foreground"> · {t.note}</span>}
                         </p>
                       </div>

@@ -45,13 +45,27 @@ function categoryFromNoteKeyword(note: string): string | undefined {
   return NOTE_KEYWORD_TO_CATEGORY.find(([pattern]) => pattern.test(note))?.[1];
 }
 
-// Credits (money received) can only be auto-imported as `kind: 'salary'` —
-// that's the only transaction type this schema allows to credit a bank
-// account. Tagging every credit with this category instead of leaving it
-// uncategorized keeps them visibly distinct from real salary (which stays
-// category-less) in the ledger label and in Insights, without needing a
-// schema change to add a real "income" type.
+// Credits (money received) auto-import as either a `repayment` — when the
+// note names someone with settlement history, i.e. they're paying you back,
+// which must never pollute income analytics — or fall back to
+// `kind: 'salary'` tagged "Other Income". Tagging every non-repayment credit
+// with this category instead of leaving it uncategorized keeps them visibly
+// distinct from real salary (which stays category-less) in the ledger label
+// and in Insights.
 const OTHER_INCOME_CATEGORY = "Other Income";
+
+// Matches a bank-alert note against known settlement people (case-
+// insensitive substring). Longest name wins so "Manoj Goel" matches before a
+// hypothetical "Goel"; names under 3 chars never match to avoid noise.
+function matchPerson(note: string, persons: string[]): string | null {
+  if (!note || persons.length === 0) return null;
+  const lower = note.toLowerCase();
+  const sorted = [...persons].sort((a, b) => b.length - a.length);
+  for (const p of sorted) {
+    if (p.trim().length >= 3 && lower.includes(p.trim().toLowerCase())) return p.trim();
+  }
+  return null;
+}
 
 // A UPI payment from your own bank account that's actually paying off one
 // of your own credit cards isn't a plain expense — it needs the app's
@@ -92,11 +106,14 @@ async function claimMessage(supabase: SupabaseClient, id: string): Promise<boole
     .select("imported_at")
     .eq("gmail_message_id", id)
     .single();
-  const isStale = existing && Date.now() - new Date(existing.imported_at as string).getTime() > CLAIM_STALE_MS;
+  const isStale =
+    existing && Date.now() - new Date(existing.imported_at as string).getTime() > CLAIM_STALE_MS;
   if (!isStale) return false;
 
   await supabase.from("imported_email_messages").delete().eq("gmail_message_id", id);
-  const { error: retryErr } = await supabase.from("imported_email_messages").insert({ gmail_message_id: id });
+  const { error: retryErr } = await supabase
+    .from("imported_email_messages")
+    .insert({ gmail_message_id: id });
   return !retryErr;
 }
 
@@ -130,11 +147,14 @@ export type ImportOptions = {
 
 // Searches for unlabeled mail from known bank senders, parses each one,
 // inserts a matching transaction, and labels the email so it's never
-// re-processed. Credits only auto-import when they land on the bank
-// account (the only kind that can be credited as 'salary') — a credit
-// hitting a credit card, or one this app can't map to a known account,
-// is left for manual entry rather than guessed at.
-export async function importTransactionsFromEmail(options: ImportOptions = {}): Promise<ImportSummary> {
+// re-processed. Credits only auto-import when they land on a bank
+// account — as a repayment when the note names someone with settlement
+// history, otherwise as salary tagged "Other Income". A credit hitting a
+// credit card, or one this app can't map to a known account, is left for
+// manual entry rather than guessed at.
+export async function importTransactionsFromEmail(
+  options: ImportOptions = {},
+): Promise<ImportSummary> {
   const accessToken = await getAccessToken();
   const [importedLabelId, unrecognizedLabelId] = await Promise.all([
     ensureLabel(accessToken, IMPORTED_LABEL),
@@ -157,21 +177,34 @@ export async function importTransactionsFromEmail(options: ImportOptions = {}): 
     process.env.EMAIL_IMPORT_START_DATE ||
     new Date(Date.now() - ROLLING_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const senderQuery = SENDERS.map((s) => `from:${s}`).join(" OR ");
-  const labelFilter = options.ignoreExistingLabels ? "" : ` -label:${IMPORTED_LABEL} -label:${UNRECOGNIZED_LABEL}`;
+  const labelFilter = options.ignoreExistingLabels
+    ? ""
+    : ` -label:${IMPORTED_LABEL} -label:${UNRECOGNIZED_LABEL}`;
   const query = `(${senderQuery})${labelFilter} after:${sinceDate.replace(/-/g, "/")}`;
 
   const ids = await listMessageIds(accessToken, query);
 
   const supabase = supabaseServer();
-  const [{ data: accounts, error: accErr }, { data: categories, error: catErr }] = await Promise.all([
+  const [
+    { data: accounts, error: accErr },
+    { data: categories, error: catErr },
+    { data: personRows, error: personErr },
+  ] = await Promise.all([
     supabase.from("accounts").select("id,name,kind"),
     supabase.from("categories").select("id,name"),
+    // People with settlement history — lets a credit naming one of them be
+    // imported as a repayment rather than fake income.
+    supabase.from("transactions").select("person").not("person", "is", null),
   ]);
   if (accErr) throw accErr;
   if (catErr) throw catErr;
+  if (personErr) throw personErr;
   const accountIdByName = new Map((accounts ?? []).map((a) => [a.name, a.id as string]));
   const bankAccountKindByName = new Map((accounts ?? []).map((a) => [a.name, a.kind as string]));
   const categoryIdByName = new Map((categories ?? []).map((c) => [c.name, c.id as string]));
+  const knownPersons = [
+    ...new Set((personRows ?? []).map((r) => String(r.person).trim()).filter(Boolean)),
+  ];
 
   let otherIncomeCategoryId = categoryIdByName.get(OTHER_INCOME_CATEGORY);
   if (!otherIncomeCategoryId) {
@@ -218,23 +251,35 @@ export async function importTransactionsFromEmail(options: ImportOptions = {}): 
     let rpcArgs: Record<string, unknown>;
 
     if (parsed.direction === "credit") {
-      // Only a 'bank' account can be credited as salary (the RPC itself
-      // enforces this) — a credit hitting a credit card (e.g. a refund) has
-      // no safe automatic handling here, so it's left for manual entry.
+      // Only a 'bank' account can be credited (the RPC itself enforces
+      // this) — a credit hitting a credit card (e.g. a refund) has no safe
+      // automatic handling here, so it's left for manual entry.
       if (bankAccountKindByName.get(accountName!) !== "bank") {
         await addLabel(accessToken, id, unrecognizedLabelId);
         summary.unrecognized++;
         continue;
       }
-      rpcArgs = {
-        p_amount: parsed.amountRupees,
-        p_kind: "salary",
-        p_account_id: accountId,
-        p_category_id: otherIncomeCategoryId,
-        p_linked_account_id: null as unknown as string,
-        p_note: parsed.note,
-        p_occurred_at: occurredAt,
-      };
+      const repayer = matchPerson(parsed.note, knownPersons);
+      rpcArgs = repayer
+        ? {
+            p_amount: parsed.amountRupees,
+            p_kind: "repayment",
+            p_account_id: accountId,
+            p_category_id: null as unknown as string,
+            p_linked_account_id: null as unknown as string,
+            p_note: parsed.note,
+            p_person: repayer,
+            p_occurred_at: occurredAt,
+          }
+        : {
+            p_amount: parsed.amountRupees,
+            p_kind: "salary",
+            p_account_id: accountId,
+            p_category_id: otherIncomeCategoryId,
+            p_linked_account_id: null as unknown as string,
+            p_note: parsed.note,
+            p_occurred_at: occurredAt,
+          };
     } else if (looksLikeCardBillPayment(parsed.note)) {
       const cardName = detectBillPaymentCardName(parsed.note);
       const cardAccountId = cardName ? accountIdByName.get(cardName) : undefined;
@@ -256,7 +301,8 @@ export async function importTransactionsFromEmail(options: ImportOptions = {}): 
       };
     } else {
       const categoryName =
-        (parsed.vpa ? VPA_TO_CATEGORY[parsed.vpa.toLowerCase()] : undefined) ?? categoryFromNoteKeyword(parsed.note);
+        (parsed.vpa ? VPA_TO_CATEGORY[parsed.vpa.toLowerCase()] : undefined) ??
+        categoryFromNoteKeyword(parsed.note);
       const categoryId = categoryName ? categoryIdByName.get(categoryName) : undefined;
       rpcArgs = {
         p_amount: parsed.amountRupees,

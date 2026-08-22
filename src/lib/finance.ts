@@ -15,14 +15,23 @@ export type Category = {
   is_custom: boolean;
 };
 
+export type TransactionKind = "expense" | "salary" | "card_payment" | "lent" | "repayment";
+
+// Settlement kinds: money moved on behalf of another person. Neither is
+// personal spending nor income, so analytics must exclude both.
+export const SETTLEMENT_KINDS: readonly TransactionKind[] = ["lent", "repayment"];
+export const isSettlement = (kind: string): kind is TransactionKind =>
+  kind === "lent" || kind === "repayment";
+
 export type Transaction = {
   id: string;
   amount: number;
-  kind: "expense" | "salary" | "card_payment";
+  kind: TransactionKind;
   account_id: string;
   category_id: string | null;
   linked_account_id: string | null;
   note: string | null;
+  person: string | null;
   occurred_at: string;
   created_at: string;
 };
@@ -36,10 +45,7 @@ export type SpendingLimit = {
 export const accountsQuery = queryOptions({
   queryKey: ["accounts"],
   queryFn: async (): Promise<Account[]> => {
-    const { data, error } = await supabase
-      .from("accounts")
-      .select("*")
-      .order("sort_order");
+    const { data, error } = await supabase.from("accounts").select("*").order("sort_order");
     if (error) throw error;
     return (data ?? []) as Account[];
   },
@@ -100,6 +106,22 @@ export const spendingLimitsQuery = queryOptions({
   },
 });
 
+// All-time settlement entries (lent/repayment), independent of month windows
+// and the recent-200 cap — computing who still owes what needs the complete
+// history. Settlements are rare relative to expenses, so this stays small.
+export const receivablesQuery = queryOptions({
+  queryKey: ["transactions", "receivables"],
+  queryFn: async (): Promise<Transaction[]> => {
+    const { data, error } = await supabase
+      .from("transactions")
+      .select("*")
+      .in("kind", ["lent", "repayment"])
+      .order("occurred_at", { ascending: false });
+    if (error) throw error;
+    return (data ?? []) as Transaction[];
+  },
+});
+
 // Combines a `YYYY-MM-DD` date-input value with a time-of-day (defaults to
 // now) into an ISO timestamp, so backdated entries still sort sensibly.
 export function dateInputToISO(dateStr: string, timeSource: Date = new Date()): string {
@@ -128,11 +150,12 @@ export function formatINR(n: number, opts: { sign?: boolean } = {}) {
 
 export async function applyTransaction(args: {
   amount: number;
-  kind: "expense" | "salary" | "card_payment";
+  kind: TransactionKind;
   account_id: string;
   category_id?: string | null;
   linked_account_id?: string | null;
   note?: string | null;
+  person?: string | null;
   occurred_at?: string;
 }) {
   const { error } = await supabase.rpc("apply_transaction", {
@@ -142,6 +165,7 @@ export async function applyTransaction(args: {
     p_category_id: (args.category_id ?? null) as unknown as string,
     p_linked_account_id: (args.linked_account_id ?? null) as unknown as string,
     p_note: (args.note ?? null) as unknown as string,
+    p_person: (args.person ?? null) as unknown as string,
     p_occurred_at: args.occurred_at ?? new Date().toISOString(),
   });
   if (error) throw error;
@@ -162,44 +186,52 @@ export async function restoreTransaction(t: Transaction) {
     category_id: t.category_id,
     linked_account_id: t.linked_account_id,
     note: t.note,
+    person: t.person,
     occurred_at: t.occurred_at,
   });
 }
 
 // Edits a transaction in place: reverses the original's balance effect,
-// then re-applies the new values under the same kind. Not atomic (two RPC
+// then re-applies the new values. `kind` may be overridden to convert
+// between kinds (e.g. an expense that was actually lent to someone, or an
+// auto-imported credit that was actually a repayment). Not atomic (two RPC
 // calls), which is an acceptable tradeoff for a single-user app with no
 // concurrent writers.
 export async function editTransaction(
   original: Transaction,
   updates: {
     amount: number;
+    kind?: TransactionKind;
     category_id: string | null;
     account_id: string;
     linked_account_id: string | null;
     note: string | null;
+    person?: string | null;
     occurred_at: string;
   },
 ) {
   await deleteTransaction(original.id);
   await applyTransaction({
     amount: updates.amount,
-    kind: original.kind,
+    kind: updates.kind ?? original.kind,
     account_id: updates.account_id,
     category_id: updates.category_id,
     linked_account_id: updates.linked_account_id,
     note: updates.note,
+    person: updates.person ?? null,
     occurred_at: updates.occurred_at,
   });
 }
 
 // Settles two entries on the same account against each other — e.g. a
-// loan given (expense) and its repayment (salary) — collapsing them into
-// a single entry for the difference instead of leaving both sitting in
-// the ledger forever. Deletes both originals and, unless they cancel out
-// exactly, applies one new entry for the net amount under the resulting
-// sign's kind. card_payment is excluded: it already touches two accounts
-// at once, which doesn't fit this same-account netting model.
+// salary credit that was actually a correction of an earlier expense —
+// collapsing them into a single entry for the difference instead of leaving
+// both sitting in the ledger forever. Deletes both originals and, unless
+// they cancel out exactly, applies one new entry for the net amount under
+// the resulting sign's kind. card_payment is excluded: it already touches
+// two accounts at once. Settlements (lent/repayment) are excluded too:
+// they're already neutral pairs with their own receivable history, and
+// collapsing them would erase who-owes-what.
 export async function netTransactions(
   a: Transaction,
   b: Transaction,
@@ -208,8 +240,13 @@ export async function netTransactions(
   if (a.account_id !== b.account_id) {
     throw new Error("Can only net two entries on the same account");
   }
-  if (a.kind === "card_payment" || b.kind === "card_payment") {
-    throw new Error("Card payments can't be netted");
+  if (
+    a.kind === "card_payment" ||
+    b.kind === "card_payment" ||
+    isSettlement(a.kind) ||
+    isSettlement(b.kind)
+  ) {
+    throw new Error("Card payments and settlements can't be netted");
   }
 
   const signed = (t: Transaction) => (t.kind === "salary" ? Number(t.amount) : -Number(t.amount));
@@ -245,12 +282,8 @@ export async function deleteCategory(id: string) {
   if (error) throw error;
 }
 
-
 export async function setAccountBalance(id: string, balance: number) {
-  const { error } = await supabase
-    .from("accounts")
-    .update({ balance })
-    .eq("id", id);
+  const { error } = await supabase.from("accounts").update({ balance }).eq("id", id);
   if (error) throw error;
 }
 
@@ -259,4 +292,52 @@ export async function upsertLimit(category_id: string, monthly_limit: number) {
     .from("spending_limits")
     .upsert({ category_id, monthly_limit }, { onConflict: "category_id" });
   if (error) throw error;
+}
+
+export type Receivable = {
+  person: string;
+  lent: number;
+  repaid: number;
+  outstanding: number; // > 0 → they still owe this much
+};
+
+// Groups settlement entries into per-person totals. Person names are free
+// text, so grouping is case- and whitespace-insensitive while keeping the
+// most recent spelling for display.
+export function receivablesByPerson(
+  settlements: ReadonlyArray<{ kind: string; amount: number | string; person: string | null }>,
+): Receivable[] {
+  const map = new Map<string, Receivable>();
+  for (const t of settlements) {
+    if (!isSettlement(t.kind) || !t.person) continue;
+    const key = t.person.trim().replace(/\s+/g, " ").toLowerCase();
+    let r = map.get(key);
+    if (!r) {
+      r = { person: t.person.trim(), lent: 0, repaid: 0, outstanding: 0 };
+      map.set(key, r);
+    }
+    if (t.kind === "lent") r.lent += Number(t.amount);
+    else r.repaid += Number(t.amount);
+    r.outstanding = r.lent - r.repaid;
+  }
+  // Most owed first; fully-settled people sink to the bottom.
+  return [...map.values()].sort((a, b) => b.outstanding - a.outstanding || b.lent - a.lent);
+}
+
+// Distinct person names ever used in settlements — feeds autocomplete.
+export function knownPeople(
+  settlements: ReadonlyArray<{ kind: string; amount: number | string; person: string | null }>,
+): { name: string; outstanding: number }[] {
+  return receivablesByPerson(settlements).map((r) => ({
+    name: r.person,
+    outstanding: r.outstanding,
+  }));
+}
+
+export function totalOutstanding(
+  settlements: ReadonlyArray<{ kind: string; amount: number | string; person: string | null }>,
+): number {
+  return receivablesByPerson(settlements)
+    .filter((r) => r.outstanding > 0)
+    .reduce((s, r) => s + r.outstanding, 0);
 }
