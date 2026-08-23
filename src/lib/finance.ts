@@ -57,6 +57,8 @@ export type Investment = {
   quantity: number;
   price: number | null;
   value: number | null;
+  cost_value: number | null;
+  hidden: boolean;
   as_of_date: string;
 };
 

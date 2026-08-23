@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { Inbox } from "lucide-react";
+import { Eye, EyeOff, Inbox } from "lucide-react";
 import { toast } from "sonner";
 import { formatINR, investmentsQuery, portfolioSnapshotsQuery } from "@/lib/finance";
 import { supabase } from "@/integrations/supabase/client";
@@ -34,6 +34,8 @@ type LiveRow = {
   nseSymbol: string | null;
   quantity: number;
   casPrice: number | null;
+  costValue: number | null;
+  hidden: boolean;
   livePrice?: number;
   priceSource: "nav" | "quote" | "cas";
   priceDate?: string;
@@ -44,6 +46,7 @@ type LiveResponse = {
   asOfDate: string | null;
   casTotal: number;
   liveTotal: number;
+  investedTotal: number;
   holdings: LiveRow[];
 };
 
@@ -61,28 +64,61 @@ function useLivePrices() {
 }
 
 const KIND_LABELS: Record<string, string> = {
-  mutual_fund: "Mutual funds",
+  mutual_fund: "Mutual Funds",
   etf: "ETFs",
   equity: "Stocks",
-  sgb: "Gold bonds",
+  sgb: "Gold Bonds",
   bond: "Bonds",
   other: "Other",
 };
-const KIND_ORDER = ["mutual_fund", "etf", "equity", "sgb", "bond", "other"];
+// ETFs trade like stocks; they share a tab.
+function tabForKind(kind: string): string {
+  if (kind === "equity" || kind === "etf") return "equity";
+  return kind;
+}
+const TAB_LABELS: Record<string, string> = {
+  all: "All",
+  mutual_fund: "Mutual Funds",
+  equity: "Stocks",
+  sgb: "Gold Bonds",
+  bond: "Bonds",
+  other: "Other",
+};
 
-// CAS names carry the AMC boilerplate ("HDFC AMC LTD HDFC MF- <scheme>");
-// the scheme after the last "MF-" is what's worth showing.
+const TAB_KEY = "ledger:investedTab";
+
+// CAS names carry AMC boilerplate ("HDFC AMC LTD HDFC MF- <scheme>"); the
+// scheme after the last "MF-" is what's worth showing.
 function prettyName(name: string): string {
   const idx = name.toUpperCase().lastIndexOf("MF-");
   const scheme = idx >= 0 ? name.slice(idx + 3).trim() : name.trim();
   return scheme || name;
 }
 
+function pctStr(pct: number | null): string {
+  if (pct == null || !Number.isFinite(pct)) return "—";
+  return `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
+}
+
 function InvestmentsPage() {
+  const qc = useQueryClient();
   const { data: holdings = [], isLoading } = useQuery(investmentsQuery);
   const { data: snapshots = [] } = useQuery(portfolioSnapshotsQuery);
   const live = useLivePrices();
-  const [showAllHistory, setShowAllHistory] = useState(false);
+  const [tab, setTab] = useState<string>(() => {
+    if (typeof window === "undefined") return "all";
+    return window.localStorage.getItem(TAB_KEY) ?? "all";
+  });
+  const [showHidden, setShowHidden] = useState(false);
+
+  function selectTab(id: string) {
+    setTab(id);
+    try {
+      window.localStorage.setItem(TAB_KEY, id);
+    } catch {
+      /* private mode */
+    }
+  }
 
   const liveById = useMemo(() => {
     const m = new Map<string, LiveRow>();
@@ -90,34 +126,53 @@ function InvestmentsPage() {
     return m;
   }, [live.data]);
 
+  // Supabase rows render instantly; the live endpoint overlays NAVs/quotes,
+  // invested totals, and the hidden flags.
   const rows = useMemo(
     () =>
-      holdings
-        .map((h) => {
-          const l = liveById.get(h.id);
-          const value = l?.value ?? h.value ?? (h.price ?? 0) * h.quantity;
-          return {
-            id: h.id,
-            securityId: h.security_id,
-            name: prettyName(h.security.name),
-            kind: h.security.kind as string,
-            nseSymbol: h.security.nse_symbol,
-            source: h.source,
-            quantity: h.quantity,
-            price: l?.livePrice ?? h.price ?? 0,
-            priceSource: l?.priceSource ?? ("cas" as const),
-            priceDate: l?.priceDate,
-            value,
-            changePct: l?.changePct ?? null,
-            isLive: l != null,
-          };
-        })
-        .sort((a, b) => b.value - a.value),
+      holdings.map((h) => {
+        const l = liveById.get(h.id);
+        const value = l?.value ?? h.value ?? (h.price ?? 0) * h.quantity;
+        return {
+          id: h.id,
+          securityId: h.security_id,
+          source: h.source,
+          name: prettyName(h.security.name),
+          kind: h.security.kind as string,
+          quantity: h.quantity,
+          price: l?.livePrice ?? h.price ?? 0,
+          priceSource: l?.priceSource ?? ("cas" as const),
+          priceDate: l?.priceDate,
+          nseSymbol: l?.nseSymbol ?? null,
+          value,
+          costValue: l?.costValue ?? (h.cost_value != null ? Number(h.cost_value) : null),
+          changePct: l?.changePct ?? null,
+          hidden: h.hidden,
+          isLive: l != null,
+        };
+      }),
     [holdings, liveById],
   );
 
-  const total = rows.reduce((s, r) => s + r.value, 0);
-  const asOf = live.data?.asOfDate ?? holdings[0]?.as_of_date ?? null;
+  const hiddenRows = useMemo(() => rows.filter((r) => r.hidden), [rows]);
+  const visibleRows = useMemo(() => rows.filter((r) => !r.hidden), [rows]);
+
+  // Tabs derive from what's actually held, so the bar never shows empties.
+  const tabs = useMemo(() => {
+    const ids = [...new Set(visibleRows.map((r) => tabForKind(r.kind)))];
+    return ["all", ...ids];
+  }, [visibleRows]);
+
+  const tabRows = useMemo(
+    () => (tab === "all" ? visibleRows : visibleRows.filter((r) => tabForKind(r.kind) === tab)),
+    [visibleRows, tab],
+  );
+
+  const total = visibleRows.reduce((s, r) => s + r.value, 0);
+  const invested =
+    live.data?.investedTotal || visibleRows.reduce((s, r) => s + (r.costValue ?? 0), 0);
+  const overallPct = invested > 0 ? ((total - invested) / invested) * 100 : null;
+  const overallGain = invested > 0 ? total - invested : null;
 
   // Month-over-month from snapshot history (CAS lands monthly).
   const history = [...snapshots].sort((a, b) => a.as_of_date.localeCompare(b.as_of_date));
@@ -125,13 +180,31 @@ function InvestmentsPage() {
   const momDelta = prevSnapshot ? total - Number(prevSnapshot.total_value) : null;
 
   const grouped = useMemo(() => {
-    const map = new Map<string, typeof rows>();
-    for (const r of rows) {
-      if (!map.has(r.kind)) map.set(r.kind, []);
-      map.get(r.kind)!.push(r);
+    const map = new Map<string, typeof tabRows>();
+    for (const r of tabRows) {
+      const g = tabForKind(r.kind);
+      if (!map.has(g)) map.set(g, []);
+      map.get(g)!.push(r);
     }
-    return [...map.entries()].sort((a, b) => KIND_ORDER.indexOf(a[0]) - KIND_ORDER.indexOf(b[0]));
-  }, [rows]);
+    // Biggest group first so the dominant holding type leads.
+    return [...map.entries()].sort(
+      (a, b) => b[1].reduce((s, r) => s + r.value, 0) - a[1].reduce((s, r) => s + r.value, 0),
+    );
+  }, [tabRows]);
+
+  const [showAllHistory, setShowAllHistory] = useState(false);
+
+  const setHiddenMut = useMutation({
+    mutationFn: async ({ id, hidden }: { id: string; hidden: boolean }) => {
+      const { error } = await supabase.from("investments").update({ hidden }).eq("id", id);
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["investments"] });
+      toast.success("Portfolio updated");
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
 
   if (isLoading) {
     return (
@@ -160,14 +233,35 @@ function InvestmentsPage() {
   return (
     <div className="space-y-6 md:space-y-10">
       <section>
-        <p className="text-xs uppercase tracking-wider text-muted-foreground">Portfolio</p>
+        <div className="flex items-baseline justify-between gap-3">
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">Portfolio</p>
+          {hiddenRows.length > 0 && (
+            <span className="tnum text-[11px] text-muted-foreground">
+              {hiddenRows.length} hidden
+            </span>
+          )}
+        </div>
         <p className="tnum mt-2 text-4xl md:text-6xl font-semibold tracking-tight">
           {formatINR(total)}
         </p>
         <p className="mt-2 text-xs md:text-sm text-muted-foreground tnum">
-          {asOf
-            ? `CAS as of ${new Date(asOf + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}`
-            : ""}
+          {invested > 0 && (
+            <>
+              Invested {formatINR(invested)} ·{" "}
+              <span
+                className={
+                  overallPct != null && overallPct >= 0
+                    ? "text-[color:var(--success)]"
+                    : "text-destructive"
+                }
+              >
+                {overallGain != null ? `${formatINR(overallGain, { sign: true })} ` : ""}
+                {pctStr(overallPct)}
+              </span>
+              {" · "}
+            </>
+          )}
+          {asOfText(live.data?.asOfDate ?? holdings[0]?.as_of_date ?? null)}
           {momDelta != null && (
             <>
               {" · "}
@@ -177,11 +271,67 @@ function InvestmentsPage() {
               since last statement
             </>
           )}
-          {rows.some((r) => r.isLive) && <> · prices {live.isFetching ? "updating…" : "live"}</>}
+          {visibleRows.some((r) => r.isLive) && (
+            <> · prices {live.isFetching ? "updating…" : "live"}</>
+          )}
         </p>
       </section>
 
-      {visibleHistory.length >= 2 && (
+      {tabs.length > 2 && (
+        <div className="-mx-2 overflow-x-auto scrollbar-none">
+          <div className="flex gap-2 px-2 pb-1">
+            {tabs.map((t) => (
+              <button
+                key={t}
+                onClick={() => selectTab(t)}
+                className={`shrink-0 h-8 px-3.5 rounded-full text-xs border transition-colors ${
+                  tab === t
+                    ? "bg-foreground text-background border-foreground"
+                    : "border-border text-muted-foreground hover:text-foreground hover:border-foreground/30"
+                }`}
+              >
+                {TAB_LABELS[t] ?? t}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {grouped.map(([kind, kindRows]) => {
+        const kindTotal = kindRows.reduce((s, r) => s + r.value, 0);
+        const kindCost = kindRows.reduce((s, r) => s + (r.costValue ?? 0), 0);
+        const kindPct = kindCost > 0 ? ((kindTotal - kindCost) / kindCost) * 100 : null;
+        return (
+          <section key={kind}>
+            <div className="flex items-baseline justify-between mb-3">
+              <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
+                {TAB_LABELS[kind] ?? KIND_LABELS[kind] ?? kind}
+              </h2>
+              <span className="tnum text-xs text-muted-foreground">
+                {kindPct != null && (
+                  <span
+                    className={kindPct >= 0 ? "text-[color:var(--success)]" : "text-destructive"}
+                  >
+                    {pctStr(kindPct)} ·{" "}
+                  </span>
+                )}
+                {formatINR(kindTotal)}
+              </span>
+            </div>
+            <ul className="divide-y divide-border/60">
+              {kindRows.map((r) => (
+                <HoldingRow
+                  key={r.id}
+                  row={r}
+                  onHide={(id) => setHiddenMut.mutate({ id, hidden: true })}
+                />
+              ))}
+            </ul>
+          </section>
+        );
+      })}
+
+      {history.length >= 2 && (
         <section>
           <div className="flex items-baseline justify-between mb-3">
             <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
@@ -224,45 +374,67 @@ function InvestmentsPage() {
         </section>
       )}
 
-      {grouped.map(([kind, kindRows]) => {
-        const kindTotal = kindRows.reduce((s, r) => s + r.value, 0);
-        return (
-          <section key={kind}>
-            <div className="flex items-baseline justify-between mb-3">
-              <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
-                {KIND_LABELS[kind] ?? kind}
-              </h2>
-              <span className="tnum text-xs text-muted-foreground">
-                {total > 0 ? Math.round((kindTotal / total) * 100) : 0}% · {formatINR(kindTotal)}
-              </span>
-            </div>
-            <ul className="divide-y divide-border/60">
-              {kindRows.map((r) => (
-                <HoldingRow key={r.id} row={r} />
+      {hiddenRows.length > 0 && (
+        <section>
+          <button
+            onClick={() => setShowHidden((v) => !v)}
+            className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <EyeOff className="size-3.5" />
+            Hidden folios ({hiddenRows.length})
+          </button>
+          {showHidden && (
+            <ul className="mt-2 divide-y divide-border/60 rounded-xl border border-border/70 bg-surface px-3">
+              {hiddenRows.map((r) => (
+                <li key={r.id} className="flex items-center justify-between gap-3 py-2.5">
+                  <div className="min-w-0">
+                    <p className="text-sm truncate">{r.name}</p>
+                    <p className="text-[11px] text-muted-foreground truncate tnum">{r.source}</p>
+                  </div>
+                  <button
+                    onClick={() => setHiddenMut.mutate({ id: r.id, hidden: false })}
+                    className="shrink-0 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                  >
+                    <Eye className="size-3.5" /> Unhide
+                  </button>
+                </li>
               ))}
             </ul>
-          </section>
-        );
-      })}
+          )}
+        </section>
+      )}
     </div>
   );
+}
+
+function asOfText(asOf: string | null): string {
+  if (!asOf) return "";
+  return `CAS as of ${new Date(asOf + "T00:00:00").toLocaleDateString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  })}`;
 }
 
 type Row = {
   id: string;
   securityId: string;
+  source: string;
   name: string;
   kind: string;
-  nseSymbol: string | null;
   quantity: number;
   price: number;
   priceSource: "nav" | "quote" | "cas";
   priceDate?: string;
+  nseSymbol: string | null;
   value: number;
+  costValue: number | null;
   changePct: number | null;
+  hidden: boolean;
+  isLive: boolean;
 };
 
-function HoldingRow({ row }: { row: Row }) {
+function HoldingRow({ row, onHide }: { row: Row; onHide: (id: string) => void }) {
   const qc = useQueryClient();
   const [editingSymbol, setEditingSymbol] = useState(false);
   const [symbol, setSymbol] = useState("");
@@ -285,6 +457,11 @@ function HoldingRow({ row }: { row: Row }) {
     },
     onError: (e: Error) => toast.error(e.message),
   });
+
+  // Gain vs invested cost when known; otherwise day-change vs statement price.
+  const gain = row.costValue != null && row.costValue > 0 ? row.value - row.costValue : null;
+  const gainPct = gain != null && row.costValue ? (gain / row.costValue) * 100 : null;
+  const good = (gainPct ?? row.changePct ?? 0) >= 0;
 
   return (
     <li className="group flex items-center gap-4 py-3 -mx-2 px-2 rounded-md hover:bg-muted/40 transition-all">
@@ -336,15 +513,25 @@ function HoldingRow({ row }: { row: Row }) {
       </div>
       <div className="text-right shrink-0">
         <div className="tnum text-sm font-medium">{formatINR(row.value)}</div>
-        {row.changePct != null && (
+        {(gainPct != null || row.changePct != null) && (
           <div
-            className={`tnum text-xs ${row.changePct >= 0 ? "text-[color:var(--success)]" : "text-destructive"}`}
+            className={`tnum text-xs ${good ? "text-[color:var(--success)]" : "text-destructive"}`}
           >
-            {row.changePct >= 0 ? "+" : ""}
-            {row.changePct.toFixed(2)}%
+            {gain != null && `${formatINR(gain, { sign: true })} · `}
+            {gainPct != null ? pctStr(gainPct) : pctStr(row.changePct)}
           </div>
         )}
       </div>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onHide(row.id);
+        }}
+        aria-label="Hide this folio"
+        className="shrink-0 p-2 -mr-2 opacity-60 md:opacity-0 md:group-hover:opacity-100 text-muted-foreground hover:text-foreground transition-opacity"
+      >
+        <EyeOff className="size-4" />
+      </button>
     </li>
   );
 }

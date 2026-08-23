@@ -14,6 +14,8 @@ type Holding = {
   quantity: number;
   price: number | null;
   value: number | null;
+  cost_value: number | null;
+  hidden: boolean;
   as_of_date: string;
   source: string;
   security_id: string;
@@ -98,10 +100,16 @@ export default defineHandler(async () => {
     console.error("[investments] amfi unavailable:", e instanceof Error ? e.message : e);
   }
 
+  // Hidden folios are returned (so the UI can offer unhide) but excluded
+  // from every total and from quote fetching.
+  const visible = holdings.filter((h) => !h.hidden);
+
   // Equities first so Yahoo lookups run concurrently, bounded.
-  const quoteTargets = holdings.filter(
+  const quoteTargets = visible.filter(
     (h) =>
-      h.securities && h.securities.nse_symbol && (h.securities.kind === "equity" || h.securities.kind === "etf"),
+      h.securities &&
+      h.securities.nse_symbol &&
+      (h.securities.kind === "equity" || h.securities.kind === "etf"),
   );
   const quotes = new Map<string, number>();
   await Promise.all(
@@ -114,28 +122,32 @@ export default defineHandler(async () => {
   const asOfDate = holdings[0].as_of_date;
   let casTotal = 0;
   let liveTotal = 0;
+  let investedTotal = 0;
 
   const rows = holdings.map((h) => {
     const sec = h.securities ?? { isin: "?", name: "?", kind: "other", nse_symbol: null };
     const casValue = h.value ?? (h.price != null ? h.price * h.quantity : 0);
-    casTotal += casValue;
-
     let livePrice: number | undefined;
     let priceSource: "nav" | "quote" | "cas" = "cas";
     let priceDate: string | undefined;
 
-    if (sec.kind === "mutual_fund" && amfi?.get(sec.isin)) {
-      const entry = amfi.get(sec.isin)!;
-      livePrice = entry.nav;
-      priceSource = "nav";
-      priceDate = entry.date;
-    } else if (sec.nse_symbol && quotes.has(sec.nse_symbol)) {
-      livePrice = quotes.get(sec.nse_symbol);
-      priceSource = "quote";
+    if (!h.hidden) {
+      casTotal += casValue;
+      if (h.cost_value != null) investedTotal += Number(h.cost_value);
+
+      if (sec.kind === "mutual_fund" && amfi?.get(sec.isin)) {
+        const entry = amfi.get(sec.isin)!;
+        livePrice = entry.nav;
+        priceSource = "nav";
+        priceDate = entry.date;
+      } else if (sec.nse_symbol && quotes.has(sec.nse_symbol)) {
+        livePrice = quotes.get(sec.nse_symbol);
+        priceSource = "quote";
+      }
     }
 
     const value = livePrice !== undefined ? livePrice * h.quantity : casValue;
-    liveTotal += value;
+    if (!h.hidden) liveTotal += value;
 
     return {
       id: h.id,
@@ -145,6 +157,8 @@ export default defineHandler(async () => {
       nseSymbol: sec.nse_symbol,
       source: h.source,
       quantity: h.quantity,
+      hidden: h.hidden,
+      costValue: h.cost_value != null ? Number(h.cost_value) : null,
       casPrice: h.price,
       casValue,
       livePrice,
@@ -156,12 +170,13 @@ export default defineHandler(async () => {
     };
   });
 
-  rows.sort((a, b) => b.value - a.value);
+  rows.sort((a, b) => Number(b.hidden) - Number(a.hidden) || b.value - a.value);
 
   return {
     asOfDate,
     casTotal: Math.round(casTotal * 100) / 100,
     liveTotal: Math.round(liveTotal * 100) / 100,
+    investedTotal: Math.round(investedTotal * 100) / 100,
     holdings: rows,
   };
 });

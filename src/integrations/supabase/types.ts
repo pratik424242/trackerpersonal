@@ -123,6 +123,7 @@ export type Database = {
           as_of_date: string
           cost_value: number | null
           created_at: string
+          hidden: boolean
           id: string
           price: number | null
           quantity: number
@@ -135,6 +136,7 @@ export type Database = {
           as_of_date: string
           cost_value?: number | null
           created_at?: string
+          hidden?: boolean
           id?: string
           price?: number | null
           quantity: number
@@ -147,6 +149,7 @@ export type Database = {
           as_of_date?: string
           cost_value?: number | null
           created_at?: string
+          hidden?: boolean
           id?: string
           price?: number | null
           quantity?: number
