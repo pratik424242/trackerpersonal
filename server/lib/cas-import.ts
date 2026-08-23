@@ -552,12 +552,32 @@ async function persistSnapshot(supabase: SupabaseClient, parsed: CasParseResult)
     securityIds.set(h.isin, created.id as string);
   }
 
-  // Full-snapshot replace keyed to this statement date.
-  const { error: delErr } = await supabase
-    .from("investments")
-    .delete()
-    .neq("id", "00000000-0000-0000-0000-000000000000");
-  if (delErr) throw delErr;
+  // Full-snapshot replace of the *mutual fund* rows only. Stocks, ETFs and
+  // SGBs are owned by the Zerodha Kite sync and must survive statement
+  // imports — a CAS import once wiped the user's equity holding this way.
+  const mfRowIds: string[] = [];
+  {
+    const PAGE = 200;
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabase
+        .from("investments")
+        .select("id,security_id")
+        .range(from, from + PAGE - 1);
+      if (error) throw error;
+      if (!data || data.length === 0) break;
+      const secIds = [...new Set(data.map((r) => r.security_id as string))];
+      const { data: secs } = await supabase.from("securities").select("id,kind").in("id", secIds);
+      const mfSet = new Set(
+        (secs ?? []).filter((s) => s.kind === "mutual_fund").map((s) => s.id as string),
+      );
+      for (const r of data) if (mfSet.has(r.security_id as string)) mfRowIds.push(r.id as string);
+      if (data.length < PAGE) break;
+    }
+  }
+  for (const id of mfRowIds) {
+    const { error } = await supabase.from("investments").delete().eq("id", id);
+    if (error) throw error;
+  }
 
   const rows = parsed.holdings.map((h) => ({
     security_id: securityIds.get(h.isin)!,

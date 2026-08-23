@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
-import { Eye, EyeOff, Inbox } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Eye, EyeOff, Inbox, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { formatINR, investmentsQuery, portfolioSnapshotsQuery } from "@/lib/finance";
 import { supabase } from "@/integrations/supabase/client";
@@ -63,6 +63,48 @@ function useLivePrices() {
   });
 }
 
+// Kite sync availability — cheap GET, cached for the session.
+function useKite() {
+  const qc = useQueryClient();
+  const status = useQuery<{ configured: boolean; url?: string }>({
+    queryKey: ["kite", "login"],
+    queryFn: async () => {
+      const res = await fetch("/api/kite-login");
+      if (!res.ok) throw new Error("kite status failed");
+      return (await res.json()) as { configured: boolean; url?: string };
+    },
+    staleTime: Infinity,
+    retry: false,
+  });
+
+  const sync = useMutation({
+    mutationFn: async (requestToken: string) => {
+      const res = await fetch("/api/kite-sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ request_token: requestToken }),
+      });
+      const body = (await res.json().catch(() => null)) as {
+        ok: boolean;
+        error?: string;
+        synced?: number;
+        removedSold?: number;
+      } | null;
+      if (!res.ok || !body?.ok) throw new Error(body?.error ?? `sync failed (${res.status})`);
+      return body;
+    },
+    onSuccess: (body) => {
+      let msg = `Zerodha synced · ${body.synced ?? 0} holding(s) updated`;
+      if ((body.removedSold ?? 0) > 0) msg += `, ${body.removedSold} sold position(s) cleared`;
+      toast.success(msg);
+      qc.invalidateQueries({ queryKey: ["investments"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  return { status, sync };
+}
+
 const KIND_LABELS: Record<string, string> = {
   mutual_fund: "Mutual Funds",
   etf: "ETFs",
@@ -105,6 +147,26 @@ function InvestmentsPage() {
   const { data: holdings = [], isLoading } = useQuery(investmentsQuery);
   const { data: snapshots = [] } = useQuery(portfolioSnapshotsQuery);
   const live = useLivePrices();
+  const kite = useKite();
+
+  // Returning from the Kite login redirect: /investments?request_token=…
+  // (or ?status=error). Sync immediately, then strip the query so a refresh
+  // never replays a consumed token.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const requestToken = params.get("request_token");
+    const status = params.get("status");
+    if (!requestToken && !status) return;
+    window.history.replaceState(null, "", window.location.pathname);
+    if (requestToken) {
+      kite.sync.mutate(requestToken);
+    } else {
+      toast.error("Zerodha login was cancelled or failed.");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [tab, setTab] = useState<string>(() => {
     if (typeof window === "undefined") return "all";
     return window.localStorage.getItem(TAB_KEY) ?? "all";
@@ -235,11 +297,26 @@ function InvestmentsPage() {
       <section>
         <div className="flex items-baseline justify-between gap-3">
           <p className="text-xs uppercase tracking-wider text-muted-foreground">Portfolio</p>
-          {hiddenRows.length > 0 && (
-            <span className="tnum text-[11px] text-muted-foreground">
-              {hiddenRows.length} hidden
-            </span>
-          )}
+          <div className="flex items-center gap-2">
+            {hiddenRows.length > 0 && (
+              <span className="tnum text-[11px] text-muted-foreground">
+                {hiddenRows.length} hidden
+              </span>
+            )}
+            {kite.status.data?.configured && (
+              <button
+                onClick={() => {
+                  if (kite.status.data?.url) window.location.href = kite.status.data.url;
+                }}
+                disabled={kite.sync.isPending}
+                aria-label="Sync holdings from Zerodha"
+                className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+              >
+                <RefreshCw className={`size-3.5 ${kite.sync.isPending ? "animate-spin" : ""}`} />
+                {kite.sync.isPending ? "Syncing…" : "Sync Zerodha"}
+              </button>
+            )}
+          </div>
         </div>
         <p className="tnum mt-2 text-4xl md:text-6xl font-semibold tracking-tight">
           {formatINR(total)}
