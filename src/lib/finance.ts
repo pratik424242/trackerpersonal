@@ -42,6 +42,31 @@ export type SpendingLimit = {
   monthly_limit: number;
 };
 
+export type Security = {
+  id: string;
+  isin: string;
+  name: string;
+  kind: "equity" | "etf" | "mutual_fund" | "sgb" | "bond" | "other";
+  nse_symbol: string | null;
+};
+
+export type Investment = {
+  id: string;
+  security_id: string;
+  source: string;
+  quantity: number;
+  price: number | null;
+  value: number | null;
+  as_of_date: string;
+};
+
+export type PortfolioSnapshot = {
+  id: string;
+  as_of_date: string;
+  total_value: number;
+  holdings_count: number;
+};
+
 export const accountsQuery = queryOptions({
   queryKey: ["accounts"],
   queryFn: async (): Promise<Account[]> => {
@@ -119,6 +144,36 @@ export const receivablesQuery = queryOptions({
       .order("occurred_at", { ascending: false });
     if (error) throw error;
     return (data ?? []) as Transaction[];
+  },
+});
+
+export const investmentsQuery = queryOptions({
+  queryKey: ["investments"],
+  queryFn: async (): Promise<(Investment & { security: Security })[]> => {
+    const { data, error } = await supabase
+      .from("investments")
+      .select("*, securities(*)")
+      .order("value", { ascending: false, nullsFirst: false });
+    if (error) throw error;
+    return (data ?? []).map((r) => {
+      const { securities, ...inv } = r as Investment & { securities: Security | Security[] };
+      const sec = Array.isArray(securities) ? securities[0] : securities;
+      if (!sec) throw new Error("Investment row without a matching security");
+      return { ...(inv as Investment), security: sec };
+    });
+  },
+});
+
+export const portfolioSnapshotsQuery = queryOptions({
+  queryKey: ["portfolio_snapshots"],
+  queryFn: async (): Promise<PortfolioSnapshot[]> => {
+    const { data, error } = await supabase
+      .from("portfolio_snapshots")
+      .select("*")
+      .order("as_of_date", { ascending: true })
+      .limit(60);
+    if (error) throw error;
+    return (data ?? []) as PortfolioSnapshot[];
   },
 });
 

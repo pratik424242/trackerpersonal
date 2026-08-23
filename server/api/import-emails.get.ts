@@ -1,5 +1,6 @@
 import { defineHandler, getRequestHeader, setResponseStatus } from "h3";
 import { importTransactionsFromEmail } from "../lib/import-transactions";
+import { importCasFromEmail } from "../lib/cas-import";
 import { getAccessToken, watchMailbox } from "../lib/gmail-client";
 
 // Daily safety net (Vercel Cron): re-runs the same import as the push
@@ -31,10 +32,25 @@ export default defineHandler(async (event) => {
 
   try {
     const summary = await importTransactionsFromEmail();
-    return { ok: true, watchRenewed, watchError, ...summary };
+    // Monthly CAS portfolio statement — cheap to probe on every run; it
+    // self-skips when there's nothing new or a password isn't configured.
+    let cas: Awaited<ReturnType<typeof importCasFromEmail>> | undefined;
+    let casError: string | undefined;
+    try {
+      cas = await importCasFromEmail();
+    } catch (error) {
+      casError = error instanceof Error ? error.message : String(error);
+      console.error("[import-emails] cas import failed:", casError);
+    }
+    return { ok: true, watchRenewed, watchError, ...summary, cas, casError };
   } catch (error) {
     console.error("[import-emails] import failed:", error);
     setResponseStatus(event, 500);
-    return { ok: false, watchRenewed, watchError, error: error instanceof Error ? error.message : String(error) };
+    return {
+      ok: false,
+      watchRenewed,
+      watchError,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
 });

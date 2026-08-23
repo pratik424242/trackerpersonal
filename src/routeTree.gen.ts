@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AccountsRouteImport } from './routes/accounts'
 import { Route as InsightsRouteImport } from './routes/insights'
+import { Route as InvestmentsRouteImport } from './routes/investments'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -28,35 +29,44 @@ const InsightsRoute = InsightsRouteImport.update({
   path: '/insights',
   getParentRoute: () => rootRouteImport,
 } as any)
+const InvestmentsRoute = InvestmentsRouteImport.update({
+  id: '/investments',
+  path: '/investments',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/accounts': typeof AccountsRoute
   '/insights': typeof InsightsRoute
+  '/investments': typeof InvestmentsRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/accounts': typeof AccountsRoute
   '/insights': typeof InsightsRoute
+  '/investments': typeof InvestmentsRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/accounts': typeof AccountsRoute
   '/insights': typeof InsightsRoute
+  '/investments': typeof InvestmentsRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/accounts' | '/insights'
+  fullPaths: '/' | '/accounts' | '/insights' | '/investments'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/accounts' | '/insights'
-  id: '__root__' | '/' | '/accounts' | '/insights'
+  to: '/' | '/accounts' | '/insights' | '/investments'
+  id: '__root__' | '/' | '/accounts' | '/insights' | '/investments'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AccountsRoute: typeof AccountsRoute
   InsightsRoute: typeof InsightsRoute
+  InvestmentsRoute: typeof InvestmentsRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -82,6 +92,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof InsightsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/investments': {
+      id: '/investments'
+      path: '/investments'
+      fullPath: '/investments'
+      preLoaderRoute: typeof InvestmentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -89,6 +106,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AccountsRoute: AccountsRoute,
   InsightsRoute: InsightsRoute,
+  InvestmentsRoute: InvestmentsRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

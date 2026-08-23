@@ -1,11 +1,12 @@
 import { Link } from "@tanstack/react-router";
-import { BookOpen, Wallet, LineChart, Moon, Sun } from "lucide-react";
+import { BookOpen, Wallet, LineChart, TrendingUp, Moon, Sun } from "lucide-react";
 import type { ReactNode } from "react";
 import { useTheme } from "./theme-provider";
 
 const nav = [
   { to: "/", label: "Journal", icon: BookOpen },
   { to: "/accounts", label: "Accounts", icon: Wallet },
+  { to: "/investments", label: "Invested", icon: TrendingUp },
   { to: "/insights", label: "Insights", icon: LineChart },
 ] as const;
 
@@ -26,7 +27,9 @@ export function AppShell({ children }: { children: ReactNode }) {
                 key={n.to}
                 to={n.to}
                 className="px-3 py-1.5 text-sm text-muted-foreground rounded-md hover:text-foreground hover:bg-muted transition-colors"
-                activeProps={{ className: "px-3 py-1.5 text-sm rounded-md text-foreground bg-muted" }}
+                activeProps={{
+                  className: "px-3 py-1.5 text-sm rounded-md text-foreground bg-muted",
+                }}
                 activeOptions={{ exact: true }}
               >
                 {n.label}
@@ -61,10 +64,9 @@ export function AppShell({ children }: { children: ReactNode }) {
         {children}
       </main>
 
-
       {/* Mobile bottom bar */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 border-t border-border/60 bg-background/95 backdrop-blur pb-[env(safe-area-inset-bottom)]">
-        <div className="grid grid-cols-3">
+        <div className="grid grid-cols-4">
           {nav.map((n) => {
             const Icon = n.icon;
             return (
@@ -72,7 +74,10 @@ export function AppShell({ children }: { children: ReactNode }) {
                 key={n.to}
                 to={n.to}
                 className="flex flex-col items-center gap-0.5 py-2.5 text-[11px] text-muted-foreground"
-                activeProps={{ className: "flex flex-col items-center gap-0.5 py-2.5 text-[11px] text-foreground" }}
+                activeProps={{
+                  className:
+                    "flex flex-col items-center gap-0.5 py-2.5 text-[11px] text-foreground",
+                }}
                 activeOptions={{ exact: true }}
               >
                 <Icon className="size-5" />
@@ -82,7 +87,6 @@ export function AppShell({ children }: { children: ReactNode }) {
           })}
         </div>
       </nav>
-
     </div>
   );
 }

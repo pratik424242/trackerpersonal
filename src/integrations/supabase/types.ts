@@ -91,6 +91,104 @@ export type Database = {
           },
         ]
       }
+      securities: {
+        Row: {
+          created_at: string
+          id: string
+          isin: string
+          kind: string
+          name: string
+          nse_symbol: string | null
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          isin: string
+          kind: string
+          name: string
+          nse_symbol?: string | null
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          isin?: string
+          kind?: string
+          name?: string
+          nse_symbol?: string | null
+        }
+        Relationships: []
+      }
+      investments: {
+        Row: {
+          as_of_date: string
+          created_at: string
+          id: string
+          price: number | null
+          quantity: number
+          security_id: string
+          source: string
+          updated_at: string
+          value: number | null
+        }
+        Insert: {
+          as_of_date: string
+          created_at?: string
+          id?: string
+          price?: number | null
+          quantity: number
+          security_id: string
+          source: string
+          updated_at?: string
+          value?: number | null
+        }
+        Update: {
+          as_of_date?: string
+          created_at?: string
+          id?: string
+          price?: number | null
+          quantity?: number
+          security_id?: string
+          source?: string
+          updated_at?: string
+          value?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "investments_security_id_fkey"
+            columns: ["security_id"]
+            isOneToOne: false
+            referencedRelation: "securities"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      portfolio_snapshots: {
+        Row: {
+          as_of_date: string
+          created_at: string
+          holdings_count: number
+          id: string
+          source: string
+          total_value: number
+        }
+        Insert: {
+          as_of_date: string
+          created_at?: string
+          holdings_count?: number
+          id?: string
+          source?: string
+          total_value: number
+        }
+        Update: {
+          as_of_date?: string
+          created_at?: string
+          holdings_count?: number
+          id?: string
+          source?: string
+          total_value?: number
+        }
+        Relationships: []
+      }
       transactions: {
         Row: {
           account_id: string
