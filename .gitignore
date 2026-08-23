@@ -41,3 +41,6 @@ dist-ssr
 
 .vercel
 .env*
+
+# Personal financial statements
+*.pdf

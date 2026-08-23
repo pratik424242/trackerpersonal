@@ -121,6 +121,7 @@ export type Database = {
       investments: {
         Row: {
           as_of_date: string
+          cost_value: number | null
           created_at: string
           id: string
           price: number | null
@@ -132,6 +133,7 @@ export type Database = {
         }
         Insert: {
           as_of_date: string
+          cost_value?: number | null
           created_at?: string
           id?: string
           price?: number | null
@@ -143,6 +145,7 @@ export type Database = {
         }
         Update: {
           as_of_date?: string
+          cost_value?: number | null
           created_at?: string
           id?: string
           price?: number | null

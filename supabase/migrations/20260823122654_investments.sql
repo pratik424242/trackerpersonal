@@ -25,6 +25,9 @@ CREATE TABLE public.investments (
   quantity numeric NOT NULL DEFAULT 0 CHECK (quantity >= 0),
   price numeric,
   value numeric,
+  -- Total invested (cost basis) when the source statement reports it —
+  -- needed later for gains/returns insights.
+  cost_value numeric,
   as_of_date date NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
