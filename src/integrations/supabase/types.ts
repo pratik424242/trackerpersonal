@@ -198,6 +198,7 @@ export type Database = {
       plan_settings: {
         Row: {
           expected_income: number
+          food_daily_budget: number
           id: boolean
           invest_threshold: number
           monthly_budget: number
@@ -206,6 +207,7 @@ export type Database = {
         }
         Insert: {
           expected_income?: number
+          food_daily_budget?: number
           id?: boolean
           invest_threshold?: number
           monthly_budget?: number
@@ -214,6 +216,7 @@ export type Database = {
         }
         Update: {
           expected_income?: number
+          food_daily_budget?: number
           id?: boolean
           invest_threshold?: number
           monthly_budget?: number

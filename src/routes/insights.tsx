@@ -44,10 +44,10 @@ function monthStart(offset: number) {
 
 // Personal daily food budget — a virtual "discipline score", not real
 // income/expense math, so it's shown as its own card rather than folded
-// into Savings margin. Hardcoded rather than a settings UI since it's a
-// single personal preference; ask to change it if it ever needs to.
+// into Savings margin. The number lives in plan settings so the Insights
+// card and the food planner share one source of truth.
 const FOOD_CATEGORY_NAMES = ["Outside Food", "Office Food"];
-const FOOD_DAILY_BUDGET = 300;
+const DEFAULT_FOOD_DAILY_BUDGET = 300;
 
 // Fixed per-category colors (not assigned by rank) so a category is always
 // the same color regardless of how it ranks this month — from a validated
@@ -80,6 +80,8 @@ function InsightsPage() {
   // Settlements (lent/repayment) live outside the month window on purpose:
   // receivables are all-time balances, not month-scoped flows.
   const { data: settlements = [] } = useQuery(receivablesQuery);
+  const { data: planSettings } = useQuery(planSettingsQuery);
+  const foodDaily = Number(planSettings?.food_daily_budget ?? DEFAULT_FOOD_DAILY_BUDGET);
 
   const monthSpend = thisMonth
     .filter((t) => t.kind === "expense")
@@ -155,11 +157,11 @@ function InsightsPage() {
     for (let d = 1; d <= daysTracked; d++) {
       const spend =
         spendByDay.get(new Date(som.getFullYear(), som.getMonth(), d).toDateString()) ?? 0;
-      total += FOOD_DAILY_BUDGET - spend;
-      if (spend <= FOOD_DAILY_BUDGET) daysUnder++;
+      total += foodDaily - spend;
+      if (spend <= foodDaily) daysUnder++;
     }
     return { total, daysUnder, daysTracked };
-  }, [thisMonth, categories, som, isCurrentMonth, today]);
+  }, [thisMonth, categories, som, isCurrentMonth, today, foodDaily]);
 
   const rows = categories
     .map((c) => ({
@@ -240,7 +242,7 @@ function InsightsPage() {
               {formatINR(foodBudget.total, { sign: true })}
             </p>
             <p className="mt-1 text-xs text-muted-foreground tnum">
-              ₹{FOOD_DAILY_BUDGET}/day · Outside Food + Office Food · {foodBudget.daysUnder} of{" "}
+              ₹{foodDaily}/day · Outside Food + Office Food · {foodBudget.daysUnder} of{" "}
               {foodBudget.daysTracked} days under budget
             </p>
           </div>

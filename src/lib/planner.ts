@@ -2,11 +2,13 @@ import { supabase } from "@/integrations/supabase/client";
 import { queryOptions } from "@tanstack/react-query";
 import { formatINR } from "@/lib/finance";
 
-// Plan mode is a virtual layer on top of the ledger: it never moves account
-// balances. Settings are a single row (id is pinned to true); wishlist items
-// are intentions, not transactions; the pool is an append-only event log so
-// its balance is always derivable and every skip/withdraw/invest stays
-// auditable.
+// Plan mode is a food-decision layer on top of the ledger: it never moves
+// account balances. Settings are a single row (id pinned to true); craving
+// items are intentions, not transactions; the pool is an append-only event
+// log so its balance is always derivable and every skip/withdraw/invest
+// stays auditable. Scope is deliberately narrow — food choices, nothing
+// else — mirroring the daily-discipline idea behind the Insights food card,
+// which reads the same setting.
 
 export type PlanSettings = {
   id: boolean;
@@ -14,6 +16,7 @@ export type PlanSettings = {
   monthly_budget: number;
   savings_goal: number;
   invest_threshold: number;
+  food_daily_budget: number;
   updated_at: string;
 };
 
@@ -48,6 +51,7 @@ export const DEFAULT_PLAN_SETTINGS: Omit<PlanSettings, "updated_at"> = {
   monthly_budget: 0,
   savings_goal: 0,
   invest_threshold: 1000,
+  food_daily_budget: 300,
 };
 
 export const planSettingsQuery = queryOptions({
@@ -87,12 +91,7 @@ export const planPoolEventsQuery = queryOptions({
   },
 });
 
-export async function savePlanSettings(s: {
-  expected_income: number;
-  monthly_budget: number;
-  savings_goal: number;
-  invest_threshold: number;
-}) {
+export async function savePlanSettings(s: { food_daily_budget: number; invest_threshold: number }) {
   const { error } = await supabase
     .from("plan_settings")
     .upsert({ id: true, ...s, updated_at: new Date().toISOString() }, { onConflict: "id" });
@@ -149,23 +148,53 @@ export function investedFromPlan(events: readonly PlanPoolEvent[]): {
 }
 
 // ---------------------------------------------------------------------------
-// Affordability verdict (v2 — goal-first)
+// Food spend aggregation
+
+export const FOOD_CATEGORIES = ["Outside Food", "Office Food"];
+
+export function foodCategoryIds(
+  categories: ReadonlyArray<{ id: string; name: string }>,
+): Set<string> {
+  return new Set(categories.filter((c) => FOOD_CATEGORIES.includes(c.name)).map((c) => c.id));
+}
+
+// Sums food expenses over all time (or just one day when `day` is given).
+export function sumFoodSpend(
+  txns: ReadonlyArray<{
+    kind: string;
+    category_id: string | null;
+    amount: number | string;
+    occurred_at: string;
+  }>,
+  ids: Set<string>,
+  day?: Date,
+): number {
+  let total = 0;
+  for (const t of txns) {
+    if (t.kind !== "expense" || !t.category_id || !ids.has(t.category_id)) continue;
+    if (day && new Date(t.occurred_at).toDateString() !== day.toDateString()) continue;
+    total += Number(t.amount);
+  }
+  return total;
+}
+
+// ---------------------------------------------------------------------------
+// Food affordability verdict
 //
-// Objective: protect the savings goal, then judge a purchase by what it
-// actually costs *the plan*, not by whether leftover budget can absorb it.
+// Objective: keep daily eating discipline intact and catch cravings before
+// they compound into an off-the-rails month.
 //
-//   Hard gate (both kinds): free cash now = income − spent − savingsGoal.
-//   Past that line you're into "wait N months" or "not with this plan".
+//   Fits today's allowance (dailyBudget − spentToday)?
+//     ├─ yes → is the month still on pace (≤ budget × days elapsed)?
+//     │        ├─ yes → fine (wants) / safe (needs)
+//     │        └─ no  → tight: month already running hot
+//     └─ no  → does the month's ceiling still absorb it?
+//              ├─ yes → tight: borrowing from the rest of the month
+//              └─ no  → the food budget is exhausted
 //
-//   Need  — essentials compete for budget room: fits remaining budget → fine;
-//           above it → tight (dips into surplus).
-//   Want  — discretionary cash is scarce by definition, so a want is judged
-//           by its share of the plan's monthly free cash (expectedIncome −
-//           budget − goal). A want burning a big slice gets paused even when
-//           it "fits" — a ₹1000 croissant against ₹5000 of real slack should
-//           never read as "no problem".
-// Actuals (salary/expenses already logged this month) take priority over the
-// stated expectations when they exist — the plan bends to reality.
+// Wants are judged strictly (any overshoot or hot pace pauses them with a
+// skip-&-save nudge); needs get the honest numbers without guilt — you have
+// to eat.
 
 export type VerdictLevel = "safe" | "tight" | "later" | "no";
 
@@ -173,153 +202,82 @@ export type Verdict = {
   level: VerdictLevel;
   headline: string;
   details: string[];
-  monthsAway?: number;
 };
 
-// A want consuming more than this share of monthly free cash gets flagged.
-const WANT_FREE_CASH_SHARE = 0.15;
-
-export type AffordInput = {
+export type FoodAffordInput = {
   price: number;
-  settings: Pick<PlanSettings, "expected_income" | "monthly_budget" | "savings_goal">;
   necessity: Necessity;
-  spentThisMonth: number;
-  incomeThisMonth: number;
-  isCurrentMonth: boolean;
-  daysLeftInMonth: number;
+  dailyBudget: number;
+  spentToday: number;
+  monthSpent: number;
+  daysElapsed: number; // includes today
+  daysInMonth: number;
 };
 
-export function assessPurchase(input: AffordInput): Verdict {
-  const { price, settings, necessity, spentThisMonth, incomeThisMonth, isCurrentMonth } = input;
+export function assessFoodPurchase(input: FoodAffordInput): Verdict {
+  const { price, necessity, dailyBudget: D, spentToday: T, monthSpent: M } = input;
+  const daysElapsed = Math.max(1, input.daysElapsed);
+  const daysLeft = Math.max(0, input.daysInMonth - daysElapsed);
+  const todayLeft = Math.max(0, D - T);
+  const overToday = price - todayLeft;
+  const paceTarget = D * daysElapsed;
+  const overPace = M + price - paceTarget;
+  const monthCeiling = D * input.daysInMonth;
+  const monthAfter = monthCeiling - (M + price);
 
-  const income = isCurrentMonth && incomeThisMonth > 0 ? incomeThisMonth : settings.expected_income;
-  const remainingBudget = Math.max(0, settings.monthly_budget - spentThisMonth);
-  // Planned free cash per month after executing the whole plan.
-  const spare = settings.expected_income - settings.monthly_budget - settings.savings_goal;
-  // Free cash right now without breaking this month's savings promise.
-  const freeNow = Math.max(0, income - spentThisMonth - settings.savings_goal);
-  const daysLeft = Math.max(1, input.daysLeftInMonth);
-
-  if (price > income && income > 0) {
-    return {
-      level: "no",
-      headline: "Beyond a month's income",
-      details: [
-        `Costs ${formatINR(price)} vs ${formatINR(income)} monthly income`,
-        "Only realistic as a loan, or a longer-horizon goal",
-      ],
-    };
-  }
-
-  if (price > freeNow) {
-    if (spare > 0) {
-      const monthsAway = Math.max(1, Math.ceil((price - freeNow) / spare));
-      const eta = new Date();
-      eta.setMonth(eta.getMonth() + monthsAway);
-      return {
-        level: "later",
-        headline:
-          monthsAway === 1
-            ? `Affordable next month (~${formatINR(spare)}/mo spare)`
-            : `Affordable in ~${monthsAway} months`,
-        details: [
-          `Short ${formatINR(price - freeNow)} today without touching your goal`,
-          `${formatINR(spare)}/mo planned surplus → around ${eta.toLocaleString("en-IN", { month: "long", year: "numeric" })}`,
-          "Or buy now and accept missing this month's goal",
-        ],
-        monthsAway,
-      };
-    }
-    return {
-      level: "no",
-      headline: "Not with this plan",
-      details: [
-        spare === 0
-          ? "Your plan leaves no surplus — income covers budget + goal exactly"
-          : "Your plan overspends: budget + goal exceed income",
-        `Only ${formatINR(freeNow)} of goal-safe cash is left this month`,
-      ],
-    };
-  }
-
-  // Past this point the purchase keeps the savings goal intact — the only
-  // question is how much of the plan's breathing room it consumes.
-  if (necessity === "need") {
-    if (price <= remainingBudget) {
-      const perDay = (remainingBudget - price) / daysLeft;
+  if (price <= todayLeft) {
+    if (overPace <= 0) {
       return {
         level: "safe",
-        headline: "Safe to buy",
+        headline:
+          necessity === "want" ? "Fine — small next to your budget" : "Fits today's food budget",
         details: [
-          `Fits inside ${formatINR(remainingBudget)} of unused budget`,
-          `${formatINR(perDay)}/day left after this, for ${daysLeft} more day${daysLeft === 1 ? "" : "s"}`,
-          `Savings goal of ${formatINR(settings.savings_goal)} stays intact`,
+          `${formatINR(todayLeft - price)} of today's ${formatINR(D)} left after this`,
+          `Month on pace: ${formatINR(M + price)} of ${formatINR(paceTarget)} through day ${daysElapsed}`,
         ],
       };
     }
-    return tightAboveBudget({ price, remainingBudget, settings, freeNow });
-  }
-
-  // --- want ---
-  if (spare <= 0) {
     return {
       level: "tight",
-      headline: "Worth pausing on",
+      headline: "Fits today, but the month is running hot",
       details: [
-        "Your plan has no free cash — every want eats next month's slack",
-        `Buying leaves ${formatINR(Math.max(0, freeNow - price))} of goal-safe cash`,
-        "Widen the gap (lower budget or higher income) before wants fit easily",
+        `This puts you ${formatINR(overPace)} past the month's pace (${formatINR(D)}/day)`,
+        daysLeft > 0
+          ? `${formatINR(monthCeiling - M - price)} of food money left for ${daysLeft} day${daysLeft === 1 ? "" : "s"}`
+          : "Last day of the month",
+        necessity === "want"
+          ? "A want on top of a hot month is exactly what the pause is for"
+          : "If you have to eat, keep it lean",
       ],
     };
   }
 
-  const sharePct = Math.round((price / spare) * 100);
-
-  if (price > remainingBudget) {
-    const base = tightAboveBudget({ price, remainingBudget, settings, freeNow });
-    return {
-      ...base,
-      details: [`Uses ${sharePct}% of your ${formatINR(spare)}/mo free cash`, ...base.details],
-    };
-  }
-
-  if (sharePct > WANT_FREE_CASH_SHARE * 100) {
+  if (monthAfter >= 0) {
     return {
       level: "tight",
-      headline: `Worth pausing on — ${sharePct}% of free cash`,
+      headline:
+        necessity === "want"
+          ? `Worth pausing — ${formatINR(overToday)} over today's budget`
+          : `Over today's budget by ${formatINR(overToday)}`,
       details: [
-        `${formatINR(price)} burns ${sharePct}% of your ${formatINR(spare)}/mo free cash`,
-        `After buying: ${formatINR(freeNow - price)} left before the goal is at risk`,
-        "Skip it and the full amount lands in your invest pool instead",
+        `Only ${formatINR(todayLeft)} of today's ${formatINR(D)} was left`,
+        `Borrows from other days — ${formatINR(monthCeiling - M - price)} of food money remains for ${daysLeft} day${daysLeft === 1 ? "" : "s"}`,
+        ...(necessity === "want"
+          ? ["Skip it and the full amount lands in your invest pool instead"]
+          : []),
       ],
     };
   }
 
-  const perDay = (remainingBudget - price) / daysLeft;
   return {
-    level: "safe",
-    headline: "Fine — small next to your plan",
+    level: necessity === "want" ? "no" : "tight",
+    headline: necessity === "want" ? "Off the plan" : "Month's food budget exhausted",
     details: [
-      `Only ${sharePct}% of your ${formatINR(spare)}/mo free cash`,
-      `${formatINR(perDay)}/day of budget left for ${daysLeft} more day${daysLeft === 1 ? "" : "s"}`,
-    ],
-  };
-}
-
-function tightAboveBudget(args: {
-  price: number;
-  remainingBudget: number;
-  settings: Pick<PlanSettings, "monthly_budget" | "savings_goal">;
-  freeNow: number;
-}): Verdict {
-  const { price, remainingBudget, settings, freeNow } = args;
-  return {
-    level: "tight",
-    headline: "Doable, but tight",
-    details: [
-      `Above your usual ${formatINR(settings.monthly_budget)} budget by ${formatINR(price - remainingBudget)}`,
-      `Dips into surplus — savings goal of ${formatINR(settings.savings_goal)} still holds`,
-      `Leaves ${formatINR(freeNow - price)} of free cash this month`,
+      `${formatINR(Math.abs(monthAfter))} past the ${formatINR(monthCeiling)} monthly food ceiling`,
+      "Nothing left to borrow from later days",
+      necessity === "want"
+        ? "Skip it and bank the full amount in your pool"
+        : "If you must eat, cook something cheap at home",
     ],
   };
 }

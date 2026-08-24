@@ -12,23 +12,24 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
-import { formatINR, monthTransactionsQuery } from "@/lib/finance";
+import { categoriesQuery, formatINR, monthTransactionsQuery } from "@/lib/finance";
 import {
   addPlanItem,
   addPoolEvent,
-  assessPurchase,
+  assessFoodPurchase,
   decidePlanItem,
   DEFAULT_PLAN_SETTINGS,
   deletePlanItem,
+  foodCategoryIds,
   investedFromPlan,
   planItemsQuery,
   planPoolEventsQuery,
   planSettingsQuery,
   poolBalance,
   savePlanSettings,
+  sumFoodSpend,
   type PlanItem,
   type PlanPoolEvent,
-  type PlanSettings,
   type Necessity,
   type Verdict,
   type VerdictLevel,
@@ -76,33 +77,31 @@ function PlannerModal({ onClose }: { onClose: () => void }) {
   const { data: items = [] } = useQuery(planItemsQuery);
   const { data: events = [] } = useQuery(planPoolEventsQuery);
   const { data: monthTxns = [] } = useQuery(monthTransactionsQuery(new Date()));
+  const { data: categories = [] } = useQuery(categoriesQuery);
 
-  const spentThisMonth = monthTxns
-    .filter((t) => t.kind === "expense")
-    .reduce((s, t) => s + Number(t.amount), 0);
-  const incomeThisMonth = monthTxns
-    .filter((t) => t.kind === "salary")
-    .reduce((s, t) => s + Number(t.amount), 0);
-
-  const effective: Pick<PlanSettings, "expected_income" | "monthly_budget" | "savings_goal"> =
-    settings ?? DEFAULT_PLAN_SETTINGS;
-  const configured =
-    effective.expected_income > 0 || effective.monthly_budget > 0 || effective.savings_goal > 0;
+  const foodDailyBudget = Number(
+    settings?.food_daily_budget ?? DEFAULT_PLAN_SETTINGS.food_daily_budget,
+  );
   const threshold = Number(settings?.invest_threshold ?? DEFAULT_PLAN_SETTINGS.invest_threshold);
 
+  // Food actuals for the current day and month — the same Outside/Office
+  // Food categories the Insights food card tracks.
   const now = new Date();
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const daysLeftInMonth = daysInMonth - now.getDate();
+  const daysElapsed = now.getDate();
+  const foodIds = foodCategoryIds(categories);
+  const monthFoodSpent = sumFoodSpend(monthTxns, foodIds);
+  const todayFoodSpent = sumFoodSpend(monthTxns, foodIds, now);
 
   const assess = (price: number, necessity: Necessity): Verdict =>
-    assessPurchase({
+    assessFoodPurchase({
       price,
-      settings: effective,
       necessity,
-      spentThisMonth,
-      incomeThisMonth,
-      isCurrentMonth: true,
-      daysLeftInMonth,
+      dailyBudget: foodDailyBudget,
+      spentToday: todayFoodSpent,
+      monthSpent: monthFoodSpent,
+      daysElapsed,
+      daysInMonth,
     });
 
   const invalidate = () => {
@@ -122,9 +121,9 @@ function PlannerModal({ onClose }: { onClose: () => void }) {
       >
         <div className="flex items-start justify-between">
           <div>
-            <p className="text-sm font-medium">Purchase planner</p>
+            <p className="text-sm font-medium">Food planner</p>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              Check before you buy · skipped purchases fund your investments
+              Should I eat this? · skipped cravings fund your investments
             </p>
           </div>
           <button
@@ -136,66 +135,53 @@ function PlannerModal({ onClose }: { onClose: () => void }) {
           </button>
         </div>
 
-        <PlanSetup
-          configured={configured}
-          settings={effective}
-          threshold={threshold}
-          onSaved={invalidate}
-        />
+        <PlanSetup foodDailyBudget={foodDailyBudget} threshold={threshold} onSaved={invalidate} />
 
-        {configured && (
-          <>
-            <AffordChecker assess={assess} onAdded={invalidate} />
-            <WishlistSection items={items} assess={assess} onChanged={invalidate} />
-            <PoolSection events={events} threshold={threshold} onChanged={invalidate} />
-          </>
-        )}
+        <AffordChecker
+          assess={assess}
+          onAdded={invalidate}
+          foodDailyBudget={foodDailyBudget}
+          spentToday={todayFoodSpent}
+        />
+        <WishlistSection items={items} assess={assess} onChanged={invalidate} />
+        <PoolSection events={events} threshold={threshold} onChanged={invalidate} />
       </div>
     </div>
   );
 }
 
 function PlanSetup({
-  configured,
-  settings,
+  foodDailyBudget,
   threshold,
   onSaved,
 }: {
-  configured: boolean;
-  settings: Pick<PlanSettings, "expected_income" | "monthly_budget" | "savings_goal">;
+  foodDailyBudget: number;
   threshold: number;
   onSaved: () => void;
 }) {
-  const [editing, setEditing] = useState(!configured);
-  const [income, setIncome] = useState(configured ? String(settings.expected_income) : "");
-  const [budget, setBudget] = useState(configured ? String(settings.monthly_budget) : "");
-  const [goal, setGoal] = useState(configured ? String(settings.savings_goal) : "");
+  const [editing, setEditing] = useState(false);
+  const [daily, setDaily] = useState(String(foodDailyBudget));
   const [investAt, setInvestAt] = useState(String(threshold));
 
   const mut = useMutation({
     mutationFn: () =>
       savePlanSettings({
-        expected_income: Number(income) || 0,
-        monthly_budget: Number(budget) || 0,
-        savings_goal: Number(goal) || 0,
+        food_daily_budget: Number(daily) || DEFAULT_PLAN_SETTINGS.food_daily_budget,
         invest_threshold: Number(investAt) || 1000,
       }),
     onSuccess: () => {
       setEditing(false);
       onSaved();
-      toast.success("Plan saved");
+      toast.success("Food plan saved");
     },
     onError: (e: Error) => toast.error(e.message),
   });
-
-  const overCommitted =
-    Number(income || 0) > 0 && Number(income || 0) < Number(budget || 0) + Number(goal || 0);
 
   if (!editing) {
     return (
       <section className="rounded-xl border border-border/70 p-4">
         <div className="flex items-center justify-between">
-          <p className="text-xs uppercase tracking-wider text-muted-foreground">Monthly plan</p>
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">Food plan</p>
           <button
             onClick={() => setEditing(true)}
             className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
@@ -203,11 +189,10 @@ function PlanSetup({
             <Pencil className="size-3" /> Edit
           </button>
         </div>
-        <dl className="mt-3 grid grid-cols-3 gap-2 text-center">
+        <dl className="mt-3 grid grid-cols-2 gap-2 text-center">
           {[
-            ["Income", settings.expected_income],
-            ["Budget", settings.monthly_budget],
-            ["Save", settings.savings_goal],
+            ["Per day", foodDailyBudget],
+            ["Per month", foodDailyBudget * 30],
           ].map(([label, val]) => (
             <div key={label as string} className="rounded-lg bg-muted/40 py-2">
               <dt className="text-[10px] uppercase tracking-wider text-muted-foreground">
@@ -218,20 +203,7 @@ function PlanSetup({
           ))}
         </dl>
         <p className="tnum mt-3 pt-3 border-t border-border/50 text-xs text-muted-foreground">
-          Spare after budget &amp; goal:{" "}
-          <span
-            className={
-              settings.expected_income - settings.monthly_budget - settings.savings_goal < 0
-                ? "text-destructive font-medium"
-                : "text-[color:var(--success)] font-medium"
-            }
-          >
-            {formatINR(settings.expected_income - settings.monthly_budget - settings.savings_goal, {
-              sign: true,
-            })}
-            /mo
-          </span>{" "}
-          · invest pool at {formatINR(threshold)}
+          Outside Food + Office Food · invest pool at {formatINR(threshold)}
         </p>
       </section>
     );
@@ -239,38 +211,16 @@ function PlanSetup({
 
   return (
     <section className="space-y-3">
-      <p className="text-xs uppercase tracking-wider text-muted-foreground">
-        {configured ? "Edit monthly plan" : "Set up your monthly plan"}
-      </p>
+      <p className="text-xs uppercase tracking-wider text-muted-foreground">Edit food plan</p>
       <div className="grid grid-cols-2 gap-3">
         <label className="block">
-          <span className="mb-1 block text-xs text-muted-foreground">Expected income /mo</span>
+          <span className="mb-1 block text-xs text-muted-foreground">Food budget / day</span>
           <input
-            autoFocus={!configured}
+            autoFocus
             inputMode="decimal"
-            value={income}
-            onChange={(e) => setIncome(e.target.value.replace(/[^0-9.]/g, ""))}
-            placeholder="0"
-            className={numInput}
-          />
-        </label>
-        <label className="block">
-          <span className="mb-1 block text-xs text-muted-foreground">Usual spending budget</span>
-          <input
-            inputMode="decimal"
-            value={budget}
-            onChange={(e) => setBudget(e.target.value.replace(/[^0-9.]/g, ""))}
-            placeholder="0"
-            className={numInput}
-          />
-        </label>
-        <label className="block">
-          <span className="mb-1 block text-xs text-muted-foreground">Savings goal /mo</span>
-          <input
-            inputMode="decimal"
-            value={goal}
-            onChange={(e) => setGoal(e.target.value.replace(/[^0-9.]/g, ""))}
-            placeholder="0"
+            value={daily}
+            onChange={(e) => setDaily(e.target.value.replace(/[^0-9.]/g, ""))}
+            placeholder="300"
             className={numInput}
           />
         </label>
@@ -285,17 +235,12 @@ function PlanSetup({
           />
         </label>
       </div>
-      {overCommitted && (
-        <p className="text-xs text-destructive">
-          Budget + savings exceed income — purchases will rarely be affordable.
-        </p>
-      )}
       <button
         onClick={() => mut.mutate()}
         disabled={mut.isPending}
         className="w-full h-10 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-60 transition-opacity"
       >
-        {mut.isPending ? "Saving…" : configured ? "Save plan" : "Start planning"}
+        {mut.isPending ? "Saving…" : "Save"}
       </button>
     </section>
   );
@@ -319,14 +264,18 @@ const VERDICT_STYLES: Record<VerdictLevel, { text: string; dot: string; label: s
 function AffordChecker({
   assess,
   onAdded,
+  foodDailyBudget,
+  spentToday,
 }: {
   assess: (price: number, necessity: Necessity) => Verdict;
   onAdded: () => void;
+  foodDailyBudget: number;
+  spentToday: number;
 }) {
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
-  // Wants default — the stricter lens — so casual spends must be justified
-  // against free cash rather than waved through on leftover budget.
+  // Craving is the default lens — the strict one — so impulse eats must be
+  // justified rather than waved through.
   const [necessity, setNecessity] = useState<Necessity>("want");
 
   const n = Number(price) || 0;
@@ -338,14 +287,20 @@ function AffordChecker({
       onAdded();
       setName("");
       setPrice("");
-      toast.success("Added to wishlist");
+      toast.success("Added to cravings");
     },
     onError: (e: Error) => toast.error(e.message),
   });
 
   return (
     <section className="rounded-xl border border-border/70 p-4">
-      <p className="text-xs uppercase tracking-wider text-muted-foreground">Can I afford it?</p>
+      <div className="flex items-baseline justify-between gap-2">
+        <p className="text-xs uppercase tracking-wider text-muted-foreground">Should I eat this?</p>
+        <p className="tnum text-[11px] text-muted-foreground">
+          {formatINR(Math.max(0, foodDailyBudget - spentToday))} of {formatINR(foodDailyBudget)}{" "}
+          left today
+        </p>
+      </div>
       <div className="mt-3 flex items-baseline justify-center gap-1">
         <span className="text-3xl text-muted-foreground/60 tnum">₹</span>
         <input
@@ -354,7 +309,7 @@ function AffordChecker({
           value={price}
           onChange={(e) => setPrice(e.target.value.replace(/[^0-9.]/g, ""))}
           placeholder="0"
-          aria-label="Purchase price"
+          aria-label="Food price"
           className="tnum w-full max-w-[12ch] bg-transparent text-center text-4xl font-semibold tracking-tight outline-none placeholder:text-muted-foreground/30"
         />
       </div>
@@ -362,8 +317,8 @@ function AffordChecker({
       <div className="mt-3 flex justify-center gap-1">
         {(
           [
-            ["want", "Want", "judged against free cash"],
-            ["need", "Need", "judged against budget room"],
+            ["want", "Craving", "a want — judged strictly"],
+            ["need", "Have to eat", "a need — judged fairly"],
           ] as const
         ).map(([value, label, title]) => (
           <button
@@ -385,10 +340,9 @@ function AffordChecker({
         onChange={(e) => setName(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && name.trim() && n > 0 && addMut.mutate()}
         placeholder="What is it? (optional)"
-        aria-label="Purchase name"
+        aria-label="Food name"
         className="mt-3 w-full h-9 px-3 rounded-md bg-muted/50 border border-border text-sm text-center outline-none focus:border-primary transition-colors"
       />
-
       {verdict && (
         <div className="mt-4 rounded-lg border border-border/70 bg-muted/30 p-3">
           <div className="flex items-center gap-2">
@@ -415,7 +369,7 @@ function AffordChecker({
         disabled={!name.trim() || n <= 0 || addMut.isPending}
         className="mt-3 w-full h-10 rounded-lg border border-border text-sm font-medium text-muted-foreground hover:text-foreground hover:border-foreground/40 disabled:opacity-50 disabled:pointer-events-none transition-colors"
       >
-        {addMut.isPending ? "Adding…" : "Add to wishlist"}
+        {addMut.isPending ? "Adding…" : "Save craving"}
       </button>
     </section>
   );
@@ -440,18 +394,18 @@ function WishlistSection({
     const affordable = v.level === "safe" || v.level === "tight";
     await decidePlanItem(item.id, "skipped");
     if (affordable) {
-      // The definition of the pool: affordable-but-not-bought money.
+      // The definition of the pool: resisted food money.
       await addPoolEvent(Number(item.price), "skip", item.name);
       toast.success(`${formatINR(Number(item.price))} moved to your pool`);
     } else {
-      toast("Dismissed — wasn't affordable anyway");
+      toast("Dismissed");
     }
     onChanged();
   }
 
   async function bought(item: PlanItem) {
     await decidePlanItem(item.id, "bought");
-    toast.success("Marked bought — log it in Journal if you haven't");
+    toast.success("Enjoyed it — log it in Journal if you haven't");
     onChanged();
   }
 
@@ -462,7 +416,7 @@ function WishlistSection({
   return (
     <section>
       <div className="flex items-baseline justify-between mb-3">
-        <h3 className="text-xs uppercase tracking-wider text-muted-foreground">Wishlist</h3>
+        <h3 className="text-xs uppercase tracking-wider text-muted-foreground">Cravings</h3>
         {decided.length > 0 && (
           <span className="text-[11px] text-muted-foreground tnum">
             {decided.filter((i) => i.status === "bought").length} bought ·{" "}
@@ -473,7 +427,7 @@ function WishlistSection({
 
       {pending.length === 0 ? (
         <p className="py-4 text-center text-xs text-muted-foreground">
-          Nothing planned yet — check a price above and save it here.
+          No cravings saved — check a price above and park it here.
         </p>
       ) : (
         <ul className="divide-y divide-border/60 rounded-xl border border-border/70 px-4">
@@ -487,7 +441,7 @@ function WishlistSection({
                   <span className="text-sm truncate">
                     {item.name}
                     <span className="ml-2 text-[10px] uppercase tracking-wider text-muted-foreground/70 align-middle">
-                      {item.necessity}
+                      {item.necessity === "want" ? "craving" : "need"}
                     </span>
                   </span>
                   <span className="tnum text-sm font-medium shrink-0">
