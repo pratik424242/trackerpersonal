@@ -15,13 +15,24 @@ export type Category = {
   is_custom: boolean;
 };
 
-export type TransactionKind = "expense" | "salary" | "card_payment" | "lent" | "repayment";
+export type TransactionKind =
+  | "expense"
+  | "salary"
+  | "card_payment"
+  | "lent"
+  | "repayment"
+  | "investment";
 
 // Settlement kinds: money moved on behalf of another person. Neither is
 // personal spending nor income, so analytics must exclude both.
 export const SETTLEMENT_KINDS: readonly TransactionKind[] = ["lent", "repayment"];
 export const isSettlement = (kind: string): kind is TransactionKind =>
   kind === "lent" || kind === "repayment";
+
+// Money moved into the portfolio (SIPs, stock/MF purchases). A transfer to
+// your own assets — not consumption — so spending analytics exclude it just
+// like settlements, while account balances still move like an expense.
+export const isInvestment = (kind: string): kind is TransactionKind => kind === "investment";
 
 export type Transaction = {
   id: string;
@@ -288,7 +299,9 @@ export async function editTransaction(
 // the resulting sign's kind. card_payment is excluded: it already touches
 // two accounts at once. Settlements (lent/repayment) are excluded too:
 // they're already neutral pairs with their own receivable history, and
-// collapsing them would erase who-owes-what.
+// collapsing them would erase who-owes-what. Investments are excluded for
+// the same reason: netting one against income would silently rewrite a
+// portfolio transfer into ordinary cash flow.
 export async function netTransactions(
   a: Transaction,
   b: Transaction,
@@ -301,9 +314,11 @@ export async function netTransactions(
     a.kind === "card_payment" ||
     b.kind === "card_payment" ||
     isSettlement(a.kind) ||
-    isSettlement(b.kind)
+    isSettlement(b.kind) ||
+    isInvestment(a.kind) ||
+    isInvestment(b.kind)
   ) {
-    throw new Error("Card payments and settlements can't be netted");
+    throw new Error("Card payments, settlements and investments can't be netted");
   }
 
   const signed = (t: Transaction) => (t.kind === "salary" ? Number(t.amount) : -Number(t.amount));

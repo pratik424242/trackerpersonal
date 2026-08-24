@@ -32,17 +32,18 @@ const VPA_TO_CATEGORY: Record<string, string> = {
 // Same idea, but for merchants whose note doesn't come through as a stable
 // exact VPA (e.g. ICICI's "Info:" field sometimes reduces to just a bare
 // merchant name like "zerodha") — matched by substring against the note
-// instead. Checked after the exact-VPA map.
-const NOTE_KEYWORD_TO_CATEGORY: Array<[RegExp, string]> = [
-  [/zerodha/i, "Mutual Funds"],
+// instead. These are portfolio inflows, not consumption: they import as
+// kind 'investment' so spending analytics never see them.
+const INVESTMENT_NOTE_PATTERNS: RegExp[] = [
+  /zerodha/i,
   // NACH mandate debits toward Zerodha route through the NSE/BSE clearing
   // corp rather than naming Zerodha directly — same mandate (UMRN
   // HDFC7022403244000773) every time, confirmed with the user.
-  [/indian clearing corp/i, "Mutual Funds"],
+  /indian clearing corp/i,
 ];
 
-function categoryFromNoteKeyword(note: string): string | undefined {
-  return NOTE_KEYWORD_TO_CATEGORY.find(([pattern]) => pattern.test(note))?.[1];
+function isInvestmentNote(note: string): boolean {
+  return INVESTMENT_NOTE_PATTERNS.some((pattern) => pattern.test(note));
 }
 
 // Credits (money received) auto-import as either a `repayment` — when the
@@ -260,6 +261,14 @@ export async function importTransactionsFromEmail(
         continue;
       }
       const repayer = matchPerson(parsed.note, knownPersons);
+      if (!repayer && isInvestmentNote(parsed.note)) {
+        // A credit from an investment counterparty is almost certainly a
+        // redemption/sale proceeds — real money back, but calling it income
+        // would inflate Earned. Leave it for manual entry instead of guessing.
+        await addLabel(accessToken, id, unrecognizedLabelId);
+        summary.unrecognized++;
+        continue;
+      }
       rpcArgs = repayer
         ? {
             p_amount: parsed.amountRupees,
@@ -300,19 +309,31 @@ export async function importTransactionsFromEmail(
         p_occurred_at: occurredAt,
       };
     } else {
-      const categoryName =
-        (parsed.vpa ? VPA_TO_CATEGORY[parsed.vpa.toLowerCase()] : undefined) ??
-        categoryFromNoteKeyword(parsed.note);
-      const categoryId = categoryName ? categoryIdByName.get(categoryName) : undefined;
-      rpcArgs = {
-        p_amount: parsed.amountRupees,
-        p_kind: "expense",
-        p_account_id: accountId,
-        p_category_id: (categoryId ?? null) as unknown as string,
-        p_linked_account_id: null as unknown as string,
-        p_note: parsed.note,
-        p_occurred_at: occurredAt,
-      };
+      if (isInvestmentNote(parsed.note)) {
+        // SIP autopays / stock purchases — a transfer to your own portfolio,
+        // never spending.
+        rpcArgs = {
+          p_amount: parsed.amountRupees,
+          p_kind: "investment",
+          p_account_id: accountId,
+          p_category_id: null as unknown as string,
+          p_linked_account_id: null as unknown as string,
+          p_note: parsed.note,
+          p_occurred_at: occurredAt,
+        };
+      } else {
+        const categoryName = parsed.vpa ? VPA_TO_CATEGORY[parsed.vpa.toLowerCase()] : undefined;
+        const categoryId = categoryName ? categoryIdByName.get(categoryName) : undefined;
+        rpcArgs = {
+          p_amount: parsed.amountRupees,
+          p_kind: "expense",
+          p_account_id: accountId,
+          p_category_id: (categoryId ?? null) as unknown as string,
+          p_linked_account_id: null as unknown as string,
+          p_note: parsed.note,
+          p_occurred_at: occurredAt,
+        };
+      }
     }
 
     const { error } = await supabase.rpc("apply_transaction", rpcArgs);

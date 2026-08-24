@@ -85,6 +85,11 @@ function InsightsPage() {
   const lastMonthSpend = lastMonth
     .filter((t) => t.kind === "expense")
     .reduce((s, t) => s + Number(t.amount), 0);
+  // Portfolio inflows this month. Shown for context only — never folded into
+  // Spent, since investing is a transfer to your own assets, not consumption.
+  const monthInvested = thisMonth
+    .filter((t) => t.kind === "investment")
+    .reduce((s, t) => s + Number(t.amount), 0);
   const savings = monthIncome - monthSpend;
 
   const today = new Date();
@@ -202,6 +207,11 @@ function InsightsPage() {
           {monthIncome > 0 && (
             <p className="mt-1 text-xs text-muted-foreground tnum">
               {Math.round((savings / monthIncome) * 100)}% of income
+            </p>
+          )}
+          {monthInvested > 0 && (
+            <p className="mt-2 pt-2 border-t border-border/50 text-xs text-muted-foreground tnum">
+              Invested {formatINR(monthInvested)} this month — moved to your portfolio, not spent
             </p>
           )}
         </div>

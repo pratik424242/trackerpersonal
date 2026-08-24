@@ -23,6 +23,7 @@ import {
   editTransaction,
   formatINR,
   isoToDateInput,
+  isInvestment,
   isSettlement,
   knownPeople,
   netTransactions,
@@ -58,7 +59,9 @@ function Journal() {
   const { data: settlements = [] } = useQuery(receivablesQuery);
 
   const [amount, setAmount] = useState("");
-  const [entryKind, setEntryKind] = useState<"expense" | "lent" | "repayment">("expense");
+  const [entryKind, setEntryKind] = useState<"expense" | "investment" | "lent" | "repayment">(
+    "expense",
+  );
   const [person, setPerson] = useState("");
   const [categoryId, setCategoryId] = useState<string | null>(null);
   const [accountId, setAccountId] = useState<string | null>(null);
@@ -99,15 +102,15 @@ function Journal() {
     [settlements],
   );
   const personSuggestions = useMemo(() => {
-    if (entryKind === "expense") return [];
+    if (entryKind === "expense" || entryKind === "investment") return [];
     const q = person.trim().toLowerCase();
     return people.filter((p) => !q || p.name.toLowerCase().includes(q)).slice(0, 6);
   }, [people, person, entryKind]);
 
-  function selectEntryKind(kind: "expense" | "lent" | "repayment") {
+  function selectEntryKind(kind: "expense" | "investment" | "lent" | "repayment") {
     setEntryKind(kind);
     // Prefill the last-used person so repeat lends/repayments cost no typing.
-    if (kind !== "expense") {
+    if (kind === "lent" || kind === "repayment") {
       const stored = window.localStorage.getItem(LAST_PERSON_KEY);
       if (stored && !person.trim()) setPerson(stored);
     }
@@ -282,15 +285,16 @@ function Journal() {
     const name = person.trim();
     if (entryKind === "expense") {
       if (!categoryId) return toast.error("Pick a category");
-    } else if (!name) {
-      return toast.error(entryKind === "lent" ? "Who did you pay for?" : "Who repaid you?");
+    } else if (entryKind === "lent" || entryKind === "repayment") {
+      if (!name)
+        return toast.error(entryKind === "lent" ? "Who did you pay for?" : "Who repaid you?");
     }
     logMut.mutate({
       amount: n,
       kind: entryKind,
       account_id: effectiveAccountId,
       category_id: entryKind === "expense" ? categoryId : null,
-      person: entryKind === "expense" ? null : name,
+      person: entryKind === "lent" || entryKind === "repayment" ? name : null,
       note: noteOpen && note.trim() ? note.trim() : null,
       occurred_at: dateOpen ? dateInputToISO(dateStr) : undefined,
     });
@@ -319,9 +323,9 @@ function Journal() {
       {/* Quick add */}
       <section>
         <div className="rounded-xl border border-border/70 bg-surface px-4 py-5 md:px-6 md:py-10">
-          {/* Entry kind — expenses vs money moved on someone else's behalf */}
+          {/* Entry kind — expenses vs investments vs money moved for someone else */}
           <div className="flex justify-center gap-1">
-            {(["expense", "lent", "repayment"] as const).map((k) => (
+            {(["expense", "investment", "lent", "repayment"] as const).map((k) => (
               <button
                 key={k}
                 onClick={() => selectEntryKind(k)}
@@ -331,7 +335,13 @@ function Journal() {
                     : "border-border text-muted-foreground hover:text-foreground hover:border-foreground/30"
                 }`}
               >
-                {k === "expense" ? "Expense" : k === "lent" ? "Lent" : "Repaid"}
+                {k === "expense"
+                  ? "Expense"
+                  : k === "investment"
+                    ? "Invest"
+                    : k === "lent"
+                      ? "Lent"
+                      : "Repaid"}
               </button>
             ))}
           </div>
@@ -351,7 +361,7 @@ function Journal() {
             />
           </div>
 
-          {/* Categories (expenses) or person (settlements) */}
+          {/* Categories (expenses), person (settlements) or nothing (investments) */}
           {entryKind === "expense" ? (
             <>
               <div className="mt-5 md:mt-8 -mx-2 overflow-x-auto scrollbar-none">
@@ -419,6 +429,10 @@ function Journal() {
                 </div>
               )}
             </>
+          ) : entryKind === "investment" ? (
+            <p className="mt-5 md:mt-8 text-xs text-muted-foreground text-center">
+              Moved to investments — excluded from spending analytics
+            </p>
           ) : (
             <div className="mt-5 md:mt-8">
               <input
@@ -523,9 +537,11 @@ function Journal() {
               ? "Logging…"
               : entryKind === "expense"
                 ? "Log expense"
-                : entryKind === "lent"
-                  ? "Log lent"
-                  : "Log repayment"}
+                : entryKind === "investment"
+                  ? "Log investment"
+                  : entryKind === "lent"
+                    ? "Log lent"
+                    : "Log repayment"}
           </button>
         </div>
       </section>
@@ -571,7 +587,9 @@ function Journal() {
                     ? `Lent · ${t.person ?? "?"}`
                     : t.kind === "repayment"
                       ? `${t.person ?? "?"} repaid`
-                      : (catName ?? "Uncategorized");
+                      : t.kind === "investment"
+                        ? "Investment"
+                        : (catName ?? "Uncategorized");
             return (
               <li
                 key={t.id}
@@ -642,7 +660,9 @@ function Journal() {
           onSave={(updates) => editMut.mutate({ original: editingTxn, ...updates })}
           onDelete={() => handleDelete(editingTxn)}
           onNet={
-            editingTxn.kind === "card_payment" || isSettlement(editingTxn.kind)
+            editingTxn.kind === "card_payment" ||
+            isSettlement(editingTxn.kind) ||
+            isInvestment(editingTxn.kind)
               ? undefined
               : () => {
                   setNettingTxn(editingTxn);
@@ -661,7 +681,8 @@ function Journal() {
               t.account_id === nettingTxn.account_id &&
               t.id !== nettingTxn.id &&
               t.kind !== "card_payment" &&
-              !isSettlement(t.kind),
+              !isSettlement(t.kind) &&
+              !isInvestment(t.kind),
           )}
           categories={categories}
           onClose={() => setNettingTxn(null)}
@@ -770,7 +791,9 @@ function EditTransactionModal({
           ? "Edit lent"
           : kind === "repayment"
             ? "Edit repayment"
-            : "Edit card payment";
+            : kind === "investment"
+              ? "Edit investment"
+              : "Edit card payment";
 
   return (
     <div
@@ -804,23 +827,30 @@ function EditTransactionModal({
           />
         </div>
 
-        {(txn.kind === "expense" || txn.kind === "lent") && (
+        {txn.kind === "expense" && (
+          <div className="mb-4 text-center space-y-1">
+            <button
+              onClick={() => setKind("lent")}
+              className="block mx-auto text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+            >
+              Paid for someone else?
+            </button>
+            <button
+              onClick={() => setKind("investment")}
+              className="block mx-auto text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+            >
+              Was this an investment?
+            </button>
+          </div>
+        )}
+        {(txn.kind === "lent" || txn.kind === "investment") && (
           <div className="mb-4 text-center">
-            {txn.kind === "expense" ? (
-              <button
-                onClick={() => setKind("lent")}
-                className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
-              >
-                Paid for someone else?
-              </button>
-            ) : (
-              <button
-                onClick={() => setKind("expense")}
-                className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
-              >
-                This was my own expense
-              </button>
-            )}
+            <button
+              onClick={() => setKind("expense")}
+              className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+            >
+              This was my own expense
+            </button>
           </div>
         )}
         {(txn.kind === "salary" || txn.kind === "repayment") && (
@@ -878,6 +908,10 @@ function EditTransactionModal({
               </p>
             )}
           </div>
+        ) : kind === "investment" ? (
+          <p className="mb-4 text-xs text-muted-foreground text-center">
+            Moved to investments — excluded from spending analytics
+          </p>
         ) : (
           <div className="-mx-1 overflow-x-auto scrollbar-none mb-3">
             <div className="flex gap-2 px-1 pb-1">
