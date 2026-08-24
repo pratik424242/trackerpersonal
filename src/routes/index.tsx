@@ -3,12 +3,17 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeftRight,
+  Banknote,
   CalendarDays,
   Inbox,
   Pencil,
   Plus,
+  ShoppingBag,
   StickyNote,
   Trash2,
+  TrendingUp,
+  Undo2,
+  Users,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -39,6 +44,25 @@ import {
 const LAST_ACCOUNT_KEY = "ledger:lastAccountId";
 const LAST_PERSON_KEY = "ledger:lastPerson";
 const todayInput = () => isoToDateInput(new Date().toISOString());
+
+// Kind switcher (edit modal): every convertible kind with an icon, so
+// "what is this entry?" is one glance instead of stacked prose links.
+// card_payment isn't switchable — its double-entry has no single-kind twin.
+const KIND_SWITCH_META = {
+  expense: { label: "Expense", icon: ShoppingBag },
+  investment: { label: "Invest", icon: TrendingUp },
+  lent: { label: "Lent", icon: Users },
+  repayment: { label: "Repaid", icon: Undo2 },
+  salary: { label: "Income", icon: Banknote },
+} as const;
+
+const KIND_SWITCH_TO: Record<keyof typeof KIND_SWITCH_META, readonly TransactionKind[]> = {
+  expense: ["lent", "investment"],
+  lent: ["expense"],
+  repayment: ["salary"],
+  salary: ["repayment"],
+  investment: ["expense"],
+};
 
 export const Route = createFileRoute("/")({
   loader: ({ context }) =>
@@ -827,48 +851,33 @@ function EditTransactionModal({
           />
         </div>
 
-        {txn.kind === "expense" && (
-          <div className="mb-4 text-center space-y-1">
-            <button
-              onClick={() => setKind("lent")}
-              className="block mx-auto text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
-            >
-              Paid for someone else?
-            </button>
-            <button
-              onClick={() => setKind("investment")}
-              className="block mx-auto text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
-            >
-              Was this an investment?
-            </button>
-          </div>
-        )}
-        {(txn.kind === "lent" || txn.kind === "investment") && (
-          <div className="mb-4 text-center">
-            <button
-              onClick={() => setKind("expense")}
-              className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
-            >
-              This was my own expense
-            </button>
-          </div>
-        )}
-        {(txn.kind === "salary" || txn.kind === "repayment") && (
-          <div className="mb-4 text-center">
-            {txn.kind === "salary" ? (
-              <button
-                onClick={() => setKind("repayment")}
-                className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
-              >
-                Someone was repaying me
-              </button>
-            ) : (
-              <button
-                onClick={() => setKind("salary")}
-                className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
-              >
-                This was income
-              </button>
+        {!isCardPayment && (
+          <div className="mb-4 flex flex-wrap justify-center gap-1">
+            {([kind, ...KIND_SWITCH_TO[kind as keyof typeof KIND_SWITCH_TO]] as const).map(
+              (k) => {
+                const meta = KIND_SWITCH_META[k as keyof typeof KIND_SWITCH_META];
+                const Icon = meta.icon;
+                const current = k === kind;
+                return current ? (
+                  <span
+                    key={k}
+                    aria-current="true"
+                    className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[11px] border bg-foreground text-background border-foreground"
+                  >
+                    <Icon className="size-3" />
+                    {meta.label}
+                  </span>
+                ) : (
+                  <button
+                    key={k}
+                    onClick={() => setKind(k as TransactionKind)}
+                    className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[11px] border border-border text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-colors"
+                  >
+                    <Icon className="size-3" />
+                    {meta.label}
+                  </button>
+                );
+              },
             )}
           </div>
         )}
