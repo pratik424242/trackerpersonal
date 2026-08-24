@@ -29,6 +29,7 @@ import {
   type PlanItem,
   type PlanPoolEvent,
   type PlanSettings,
+  type Necessity,
   type Verdict,
   type VerdictLevel,
 } from "@/lib/planner";
@@ -93,10 +94,11 @@ function PlannerModal({ onClose }: { onClose: () => void }) {
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const daysLeftInMonth = daysInMonth - now.getDate();
 
-  const assess = (price: number): Verdict =>
+  const assess = (price: number, necessity: Necessity): Verdict =>
     assessPurchase({
       price,
       settings: effective,
+      necessity,
       spentThisMonth,
       incomeThisMonth,
       isCurrentMonth: true,
@@ -318,17 +320,20 @@ function AffordChecker({
   assess,
   onAdded,
 }: {
-  assess: (price: number) => Verdict;
+  assess: (price: number, necessity: Necessity) => Verdict;
   onAdded: () => void;
 }) {
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
+  // Wants default — the stricter lens — so casual spends must be justified
+  // against free cash rather than waved through on leftover budget.
+  const [necessity, setNecessity] = useState<Necessity>("want");
 
   const n = Number(price) || 0;
-  const verdict = n > 0 ? assess(n) : null;
+  const verdict = n > 0 ? assess(n, necessity) : null;
 
   const addMut = useMutation({
-    mutationFn: () => addPlanItem(name.trim(), n),
+    mutationFn: () => addPlanItem(name.trim(), n, necessity),
     onSuccess: () => {
       onAdded();
       setName("");
@@ -352,6 +357,28 @@ function AffordChecker({
           aria-label="Purchase price"
           className="tnum w-full max-w-[12ch] bg-transparent text-center text-4xl font-semibold tracking-tight outline-none placeholder:text-muted-foreground/30"
         />
+      </div>
+
+      <div className="mt-3 flex justify-center gap-1">
+        {(
+          [
+            ["want", "Want", "judged against free cash"],
+            ["need", "Need", "judged against budget room"],
+          ] as const
+        ).map(([value, label, title]) => (
+          <button
+            key={value}
+            onClick={() => setNecessity(value)}
+            title={title}
+            className={`h-7 px-3.5 rounded-full text-xs border transition-colors ${
+              necessity === value
+                ? "bg-foreground text-background border-foreground"
+                : "border-border text-muted-foreground hover:text-foreground hover:border-foreground/30"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
       </div>
       <input
         value={name}
@@ -400,7 +427,7 @@ function WishlistSection({
   onChanged,
 }: {
   items: PlanItem[];
-  assess: (price: number) => Verdict;
+  assess: (price: number, necessity: Necessity) => Verdict;
   onChanged: () => void;
 }) {
   const pending = items.filter((i) => i.status === "pending");
@@ -409,7 +436,7 @@ function WishlistSection({
   const delMut = useMutation({ mutationFn: deletePlanItem });
 
   async function skip(item: PlanItem) {
-    const v = assess(Number(item.price));
+    const v = assess(Number(item.price), item.necessity);
     const affordable = v.level === "safe" || v.level === "tight";
     await decidePlanItem(item.id, "skipped");
     if (affordable) {
@@ -451,13 +478,18 @@ function WishlistSection({
       ) : (
         <ul className="divide-y divide-border/60 rounded-xl border border-border/70 px-4">
           {pending.map((item) => {
-            const v = assess(Number(item.price));
+            const v = assess(Number(item.price), item.necessity);
             const style = VERDICT_STYLES[v.level];
             const affordable = v.level === "safe" || v.level === "tight";
             return (
               <li key={item.id} className="py-3">
                 <div className="flex items-baseline justify-between gap-3">
-                  <span className="text-sm truncate">{item.name}</span>
+                  <span className="text-sm truncate">
+                    {item.name}
+                    <span className="ml-2 text-[10px] uppercase tracking-wider text-muted-foreground/70 align-middle">
+                      {item.necessity}
+                    </span>
+                  </span>
                   <span className="tnum text-sm font-medium shrink-0">
                     {formatINR(Number(item.price))}
                   </span>

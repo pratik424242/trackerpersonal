@@ -228,6 +228,7 @@ export type Database = {
           decided_at: string | null
           id: string
           name: string
+          necessity: string
           note: string | null
           price: number
           status: string
@@ -237,6 +238,7 @@ export type Database = {
           decided_at?: string | null
           id?: string
           name: string
+          necessity?: string
           note?: string | null
           price: number
           status?: string
@@ -246,6 +248,7 @@ export type Database = {
           decided_at?: string | null
           id?: string
           name?: string
+          necessity?: string
           note?: string | null
           price?: number
           status?: string
