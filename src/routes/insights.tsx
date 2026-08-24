@@ -13,6 +13,8 @@ import {
   upsertLimit,
   type Receivable,
 } from "@/lib/finance";
+import { planItemsQuery, planPoolEventsQuery, planSettingsQuery } from "@/lib/planner";
+import { PlanFab } from "@/components/planner";
 import { useTheme } from "@/components/theme-provider";
 
 export const Route = createFileRoute("/insights")({
@@ -28,6 +30,9 @@ export const Route = createFileRoute("/insights")({
       context.queryClient.ensureQueryData(spendingLimitsQuery),
       context.queryClient.ensureQueryData(monthTransactionsQuery(new Date())),
       context.queryClient.ensureQueryData(receivablesQuery),
+      context.queryClient.ensureQueryData(planSettingsQuery),
+      context.queryClient.ensureQueryData(planItemsQuery),
+      context.queryClient.ensureQueryData(planPoolEventsQuery),
     ]),
   component: InsightsPage,
 });
@@ -174,6 +179,7 @@ function InsightsPage() {
 
   return (
     <div className="space-y-6 md:space-y-10">
+      <PlanFab />
       <section>
         <div className="flex items-center justify-between">
           <button

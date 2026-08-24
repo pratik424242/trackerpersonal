@@ -44,3 +44,6 @@ dist-ssr
 
 # Personal financial statements
 *.pdf
+
+# Supabase CLI local state (contains auth details)
+supabase/.temp

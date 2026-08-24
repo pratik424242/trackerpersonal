@@ -195,6 +195,87 @@ export type Database = {
         }
         Relationships: []
       }
+      plan_settings: {
+        Row: {
+          expected_income: number
+          id: boolean
+          invest_threshold: number
+          monthly_budget: number
+          savings_goal: number
+          updated_at: string
+        }
+        Insert: {
+          expected_income?: number
+          id?: boolean
+          invest_threshold?: number
+          monthly_budget?: number
+          savings_goal?: number
+          updated_at?: string
+        }
+        Update: {
+          expected_income?: number
+          id?: boolean
+          invest_threshold?: number
+          monthly_budget?: number
+          savings_goal?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      plan_items: {
+        Row: {
+          created_at: string
+          decided_at: string | null
+          id: string
+          name: string
+          note: string | null
+          price: number
+          status: string
+        }
+        Insert: {
+          created_at?: string
+          decided_at?: string | null
+          id?: string
+          name: string
+          note?: string | null
+          price: number
+          status?: string
+        }
+        Update: {
+          created_at?: string
+          decided_at?: string | null
+          id?: string
+          name?: string
+          note?: string | null
+          price?: number
+          status?: string
+        }
+        Relationships: []
+      }
+      plan_pool_events: {
+        Row: {
+          amount: number
+          created_at: string
+          id: string
+          kind: string
+          note: string | null
+        }
+        Insert: {
+          amount: number
+          created_at?: string
+          id?: string
+          kind: string
+          note?: string | null
+        }
+        Update: {
+          amount?: number
+          created_at?: string
+          id?: string
+          kind?: string
+          note?: string | null
+        }
+        Relationships: []
+      }
       transactions: {
         Row: {
           account_id: string

@@ -22,8 +22,21 @@ export function useRealtimeSync() {
       .on("postgres_changes", { event: "*", schema: "public", table: "investments" }, () => {
         qc.invalidateQueries({ queryKey: ["investments"] });
       })
-      .on("postgres_changes", { event: "*", schema: "public", table: "portfolio_snapshots" }, () => {
-        qc.invalidateQueries({ queryKey: ["portfolio_snapshots"] });
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "portfolio_snapshots" },
+        () => {
+          qc.invalidateQueries({ queryKey: ["portfolio_snapshots"] });
+        },
+      )
+      .on("postgres_changes", { event: "*", schema: "public", table: "plan_settings" }, () => {
+        qc.invalidateQueries({ queryKey: ["plan_settings"] });
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "plan_items" }, () => {
+        qc.invalidateQueries({ queryKey: ["plan_items"] });
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "plan_pool_events" }, () => {
+        qc.invalidateQueries({ queryKey: ["plan_pool_events"] });
       })
       .subscribe();
     return () => {
