@@ -88,6 +88,14 @@ function detectBillPaymentCardName(note: string): string | null {
   return matches.length === 1 ? matches[0] : null;
 }
 
+// Deliberately no VPA-based bill-payment detection: some billers (e.g.
+// Navi's gateway) route through a VPA that never names the bank at all, but
+// that same VPA/payee can also be used for something else entirely (a loan,
+// a SIP) — a blanket "this VPA always means an ICICI bill" rule risks
+// silently miscategorizing a future unrelated payment. When automatic
+// detection can't tell, it's left as a plain expense for manual
+// reclassification via "Mark as card payment" in the edit modal instead.
+
 // A concurrent-processing guard, independent of the Gmail labels. Labels
 // alone aren't safe against two runs (e.g. a manual trigger racing a
 // just-renewed push notification) both listing the same unlabeled message

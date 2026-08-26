@@ -44,8 +44,12 @@ export function parseHdfc(text: string): ParsedTxn | null {
   // Bank account UPI, e.g.
   // "Rs.5700.00 is debited from your account ending 0702 towards VPA
   //  9647793131@ptyes (Manoj Goel) on 23-07-26."
+  // "...towards VPA navi12.payu@axisbank (Navi Limited) on 27-08-26."
+  // VPA capture requires an "@" and only stops at whitespace — a bare
+  // `.` terminator would truncate any VPA with a dot in its local part
+  // (like navi12.payu@...) right at that internal dot.
   m = text.match(
-    /Rs\.?\s*([\d,]+\.\d{2})\s+is\s+(debited|credited)\s+from\s+your\s+account\s+ending\s*(\d{4})\s+towards\s+VPA\s+(\S+?)(?:\s*\(([^)]+)\))?[\s.]/i,
+    /Rs\.?\s*([\d,]+\.\d{2})\s+is\s+(debited|credited)\s+from\s+your\s+account\s+ending\s*(\d{4})\s+towards\s+VPA\s+(\S+@\S+?)(?:\s*\(([^)]+)\))?\s/i,
   );
   if (m) {
     const vpa = m[4];

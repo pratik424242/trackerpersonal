@@ -5,6 +5,7 @@ import {
   ArrowLeftRight,
   Banknote,
   CalendarDays,
+  CreditCard,
   Inbox,
   Pencil,
   Plus,
@@ -46,22 +47,27 @@ const LAST_PERSON_KEY = "ledger:lastPerson";
 const todayInput = () => isoToDateInput(new Date().toISOString());
 
 // Kind switcher (edit modal): every convertible kind with an icon, so
-// "what is this entry?" is one glance instead of stacked prose links.
-// card_payment isn't switchable — its double-entry has no single-kind twin.
+// "what is this entry?" is one glance instead of stacked prose links. A
+// *genuine* auto-imported card_payment stays fixed (its double-entry has no
+// single-kind twin) — but an expense that turns out to have actually been a
+// card bill (e.g. paid through a gateway VPA that never named the bank, so
+// auto-detection couldn't catch it) can still convert into one here.
 const KIND_SWITCH_META = {
   expense: { label: "Expense", icon: ShoppingBag },
   investment: { label: "Invest", icon: TrendingUp },
   lent: { label: "Lent", icon: Users },
   repayment: { label: "Repaid", icon: Undo2 },
   salary: { label: "Income", icon: Banknote },
+  card_payment: { label: "Card bill", icon: CreditCard },
 } as const;
 
 const KIND_SWITCH_TO: Record<keyof typeof KIND_SWITCH_META, readonly TransactionKind[]> = {
-  expense: ["lent", "investment"],
+  expense: ["lent", "investment", "card_payment"],
   lent: ["expense"],
   repayment: ["salary"],
   salary: ["repayment"],
   investment: ["expense"],
+  card_payment: ["expense"],
 };
 
 export const Route = createFileRoute("/")({
@@ -780,7 +786,7 @@ function EditTransactionModal({
     const src = accounts.find((a) => a.id === accountId);
     if (!src) return;
     if (
-      (kind === "salary" || kind === "repayment") &&
+      (kind === "salary" || kind === "repayment" || kind === "card_payment") &&
       src.kind !== "bank" &&
       accounts.some((a) => a.kind === "bank")
     ) {
@@ -851,7 +857,10 @@ function EditTransactionModal({
           />
         </div>
 
-        {!isCardPayment && (
+        {/* A genuine imported card_payment stays fixed; one just converted
+            here (from an expense) keeps the switcher so a misclick can
+            still be backed out before saving. */}
+        {!(txn.kind === "card_payment") && (
           <div className="mb-4 flex flex-wrap justify-center gap-1">
             {([kind, ...KIND_SWITCH_TO[kind as keyof typeof KIND_SWITCH_TO]] as const).map(
               (k) => {
