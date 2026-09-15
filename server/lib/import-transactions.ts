@@ -18,6 +18,9 @@ const LAST4_TO_ACCOUNT: Record<string, string> = {
   "0702": "Bank",
   "2149": "HDFC",
   "9008": "ICICI",
+  // 1003 is an add-on card on the same ICICI account — same underlying
+  // debt as 9008, just a supplementary card number.
+  "1003": "ICICI",
 };
 
 // Recurring merchant VPAs that are reliably always the same category, so
