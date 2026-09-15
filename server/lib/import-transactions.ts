@@ -240,6 +240,28 @@ export async function importTransactionsFromEmail(
       continue;
     }
 
+    // Everything from here on can throw (a transient Gmail API network
+    // error, an unexpected parse exception) — without this try/catch, that
+    // would both abandon every remaining id in this run *and* leave the
+    // claim stranded (only the RPC-error path below released it), blocking
+    // retries on this message until the staleness window passed. Caught,
+    // it's just one failed message; the run carries on and the claim frees
+    // up immediately for the next attempt.
+    try {
+      await processOneMessage(id);
+    } catch (err) {
+      console.error(
+        `[import-emails] unexpected error processing message ${id}:`,
+        err instanceof Error ? err.message : err,
+      );
+      summary.failed++;
+      await releaseClaim(supabase, id);
+    }
+  }
+
+  return summary;
+
+  async function processOneMessage(id: string): Promise<void> {
     const msg = await getMessage(accessToken, id);
     const from = msg.payload.headers.find((h) => h.name.toLowerCase() === "from")?.value ?? "";
     const body = extractBody(msg.payload);
@@ -248,7 +270,7 @@ export async function importTransactionsFromEmail(
     if (!parsed) {
       await addLabel(accessToken, id, unrecognizedLabelId);
       summary.unrecognized++;
-      continue;
+      return;
     }
 
     const accountName = LAST4_TO_ACCOUNT[parsed.last4];
@@ -256,7 +278,7 @@ export async function importTransactionsFromEmail(
     if (!accountId) {
       await addLabel(accessToken, id, unrecognizedLabelId);
       summary.unrecognized++;
-      continue;
+      return;
     }
 
     const occurredAt = new Date(Number(msg.internalDate)).toISOString();
@@ -269,7 +291,7 @@ export async function importTransactionsFromEmail(
       if (bankAccountKindByName.get(accountName!) !== "bank") {
         await addLabel(accessToken, id, unrecognizedLabelId);
         summary.unrecognized++;
-        continue;
+        return;
       }
       const repayer = matchPerson(parsed.note, knownPersons);
       if (!repayer && isInvestmentNote(parsed.note)) {
@@ -278,7 +300,7 @@ export async function importTransactionsFromEmail(
         // would inflate Earned. Leave it for manual entry instead of guessing.
         await addLabel(accessToken, id, unrecognizedLabelId);
         summary.unrecognized++;
-        continue;
+        return;
       }
       rpcArgs = repayer
         ? {
@@ -308,7 +330,7 @@ export async function importTransactionsFromEmail(
         // cards — leave it for manual entry rather than guess.
         await addLabel(accessToken, id, unrecognizedLabelId);
         summary.unrecognized++;
-        continue;
+        return;
       }
       rpcArgs = {
         p_amount: parsed.amountRupees,
@@ -353,12 +375,10 @@ export async function importTransactionsFromEmail(
       console.error(`[import-emails] apply_transaction failed for message ${id}:`, error.message);
       summary.failed++;
       await releaseClaim(supabase, id); // leave unlabeled and unclaimed so the next run retries it
-      continue;
+      return;
     }
 
     await addLabel(accessToken, id, importedLabelId);
     summary.imported++;
   }
-
-  return summary;
 }
