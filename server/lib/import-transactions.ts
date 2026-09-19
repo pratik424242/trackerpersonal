@@ -49,6 +49,16 @@ function isInvestmentNote(note: string): boolean {
   return INVESTMENT_NOTE_PATTERNS.some((pattern) => pattern.test(note));
 }
 
+// Same idea as VPA_TO_CATEGORY, but for merchants whose note is stable
+// enough as a *substring* to trust without an exact VPA match — e.g. BMTC
+// (Bangalore's public bus service) is unambiguous wherever it appears, so
+// this is safe as a blanket rule unlike a generic payment-gateway VPA.
+const NOTE_KEYWORD_TO_CATEGORY: Array<[RegExp, string]> = [[/bmtc/i, "Outside Travel"]];
+
+function categoryFromNoteKeyword(note: string): string | undefined {
+  return NOTE_KEYWORD_TO_CATEGORY.find(([pattern]) => pattern.test(note))?.[1];
+}
+
 // Credits (money received) auto-import as either a `repayment` — when the
 // note names someone with settlement history, i.e. they're paying you back,
 // which must never pollute income analytics — or fall back to
@@ -355,7 +365,9 @@ export async function importTransactionsFromEmail(
           p_occurred_at: occurredAt,
         };
       } else {
-        const categoryName = parsed.vpa ? VPA_TO_CATEGORY[parsed.vpa.toLowerCase()] : undefined;
+        const categoryName =
+          (parsed.vpa ? VPA_TO_CATEGORY[parsed.vpa.toLowerCase()] : undefined) ??
+          categoryFromNoteKeyword(parsed.note);
         const categoryId = categoryName ? categoryIdByName.get(categoryName) : undefined;
         rpcArgs = {
           p_amount: parsed.amountRupees,
