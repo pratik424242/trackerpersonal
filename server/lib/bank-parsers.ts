@@ -77,7 +77,7 @@ export function parseHdfc(text: string): ParsedTxn | null {
       amountRupees: toAmount(m[1]),
       direction: toDirection(m[2]),
       last4: m[3],
-      note: name && vpa ? `${name} (${vpa})` : name ?? vpa ?? "",
+      note: name && vpa ? `${name} (${vpa})` : (name ?? vpa ?? ""),
       vpa,
     };
   }
@@ -180,5 +180,22 @@ export function parseBankEmail(fromHeader: string, text: string): ParsedTxn | nu
   const from = fromHeader.toLowerCase();
   if (from.includes("hdfcbank")) return parseHdfc(text);
   if (from.includes("icici")) return parseIcici(text);
+  if (from.includes("sbicard")) return parseSbi(text);
   return null;
+}
+
+export function parseSbi(text: string): ParsedTxn | null {
+  // Card spend alert from onlinesbicard@sbicard.com, e.g.
+  // "Rs.497.00 spent on your SBI Credit Card ending 0870 at ZEPTOMARKETPLACEPRIV on 27/09/26."
+  // "Rs.10,006.00 spent on your SBI Credit Card ending 0870 at IBIBOGROUPPRIVATELI on 27/09/26."
+  const m = text.match(
+    /Rs\.?\s*([\d,]+\.\d{2})\s+spent\s+on\s+your\s+SBI\s+Credit\s+Card\s+ending\s+(\d{4})\s+at\s+(.+?)\s+on\s+\d{1,2}\/\d{1,2}\/\d{2,4}/i,
+  );
+  if (!m) return null;
+  return {
+    amountRupees: toAmount(m[1]),
+    direction: "debit",
+    last4: m[2],
+    note: m[3].trim(),
+  };
 }

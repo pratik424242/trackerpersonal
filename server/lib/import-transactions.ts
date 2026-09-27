@@ -8,7 +8,7 @@ import { parseBankEmail } from "./bank-parsers";
 // nachautoemailer@ for NACH mandate debits, etc.), and a narrower exact-match
 // list silently drops a whole class of mail from the search itself, before
 // parsing ever gets a chance to run.
-const SENDERS = ["hdfcbank.bank.in", "icici.bank.in"];
+const SENDERS = ["hdfcbank.bank.in", "icici.bank.in", "sbicard.com"];
 
 const IMPORTED_LABEL = "LedgerImported";
 const UNRECOGNIZED_LABEL = "LedgerUnrecognized";
@@ -21,6 +21,7 @@ const LAST4_TO_ACCOUNT: Record<string, string> = {
   // 1003 is an add-on card on the same ICICI account — same underlying
   // debt as 9008, just a supplementary card number.
   "1003": "ICICI",
+  "0870": "SBI",
 };
 
 // Recurring merchant VPAs that are reliably always the same category, so
@@ -53,7 +54,14 @@ function isInvestmentNote(note: string): boolean {
 // enough as a *substring* to trust without an exact VPA match — e.g. BMTC
 // (Bangalore's public bus service) is unambiguous wherever it appears, so
 // this is safe as a blanket rule unlike a generic payment-gateway VPA.
-const NOTE_KEYWORD_TO_CATEGORY: Array<[RegExp, string]> = [[/bmtc/i, "Outside Travel"]];
+// Zepto (groceries) and Ibibo Group (Goibibo travel bookings, as seen on SBI
+// card alerts) are equally unambiguous merchant strings.
+const NOTE_KEYWORD_TO_CATEGORY: Array<[RegExp, string]> = [
+  [/bmtc/i, "Outside Travel"],
+  [/\bzepto/i, "Grocery"],
+  // Matches IBIBOGROUPPRIVATELI and GOIBIBO alike.
+  [/ibibo/i, "Outside Travel"],
+];
 
 function categoryFromNoteKeyword(note: string): string | undefined {
   return NOTE_KEYWORD_TO_CATEGORY.find(([pattern]) => pattern.test(note))?.[1];
@@ -95,7 +103,7 @@ function looksLikeCardBillPayment(note: string): boolean {
 // resolve which of this app's credit card accounts it's for. Only exact,
 // unambiguous name matches count; anything else is left for manual entry
 // via Accounts -> Clear bill rather than guessed at.
-const CREDIT_CARD_ACCOUNT_NAMES = ["HDFC", "ICICI"];
+const CREDIT_CARD_ACCOUNT_NAMES = ["HDFC", "ICICI", "SBI"];
 function detectBillPaymentCardName(note: string): string | null {
   const matches = CREDIT_CARD_ACCOUNT_NAMES.filter((name) => new RegExp(name, "i").test(note));
   return matches.length === 1 ? matches[0] : null;
