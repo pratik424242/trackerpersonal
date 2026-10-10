@@ -50,6 +50,42 @@ function isInvestmentNote(note: string): boolean {
   return INVESTMENT_NOTE_PATTERNS.some((pattern) => pattern.test(note));
 }
 
+// Zerodha SIP autopays arrive as TWO alert emails for a single debit — one
+// naming Zerodha, one routing through Indian Clearing Corp (same mandate,
+// same day, same amount). Importing both double-counts every SIP, so when
+// one half of the pair is already in the ledger, the other is labeled
+// imported and skipped. Matching is deliberately narrow (same account +
+// amount + UTC day + the complementary note pattern) so two genuinely
+// distinct same-day SIPs still both import.
+async function hasMandateSibling(
+  supabase: SupabaseClient,
+  accountId: string,
+  amount: number,
+  occurredAtISO: string,
+  note: string,
+): Promise<boolean> {
+  const siblingPattern = /zerodha/i.test(note)
+    ? /indian clearing corp/i
+    : /indian clearing corp/i.test(note)
+      ? /zerodha/i
+      : null;
+  if (!siblingPattern) return false;
+
+  const day = new Date(occurredAtISO);
+  const dayStart = new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate()));
+  const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+  const { data, error } = await supabase
+    .from("transactions")
+    .select("id,note")
+    .eq("account_id", accountId)
+    .eq("kind", "investment")
+    .eq("amount", amount)
+    .gte("occurred_at", dayStart.toISOString())
+    .lt("occurred_at", dayEnd.toISOString());
+  if (error) throw error;
+  return (data ?? []).some((r) => siblingPattern.test(String(r.note ?? "")));
+}
+
 // Same idea as VPA_TO_CATEGORY, but for merchants whose note is stable
 // enough as a *substring* to trust without an exact VPA match — e.g. BMTC
 // (Bangalore's public bus service) is unambiguous wherever it appears, so
@@ -362,7 +398,15 @@ export async function importTransactionsFromEmail(
     } else {
       if (isInvestmentNote(parsed.note)) {
         // SIP autopays / stock purchases — a transfer to your own portfolio,
-        // never spending.
+        // never spending. Zerodha mandates arrive as twin alerts (see
+        // hasMandateSibling) — the second half is skipped, not double-counted.
+        if (
+          await hasMandateSibling(supabase, accountId, parsed.amountRupees, occurredAt, parsed.note)
+        ) {
+          await addLabel(accessToken, id, importedLabelId);
+          summary.imported++;
+          return;
+        }
         rpcArgs = {
           p_amount: parsed.amountRupees,
           p_kind: "investment",
