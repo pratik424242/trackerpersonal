@@ -778,7 +778,6 @@ function EditTransactionModal({
       ? accounts.filter((a) => a.kind === "bank")
       : accounts;
   const cardAccounts = accounts.filter((a) => a.kind === "credit_card");
-  const destBanks = accounts.filter((a) => a.kind === "bank" && a.id !== accountId);
 
   const [amount, setAmount] = useState(String(Number(txn.amount)));
   const [categoryId, setCategoryId] = useState(txn.category_id);
@@ -787,6 +786,10 @@ function EditTransactionModal({
   const [note, setNote] = useState(txn.note ?? "");
   const [person, setPerson] = useState(txn.person ?? "");
   const [dateStr, setDateStr] = useState(isoToDateInput(txn.occurred_at));
+
+  // Banks eligible as a transfer destination — everything except the source.
+  // Declared after the state above: it reads `accountId`.
+  const destBanks = accounts.filter((a) => a.kind === "bank" && a.id !== accountId);
 
   // If the source no longer allows the current account after conversion
   // (e.g. salary → repayment keeps bank anyway; expense → repayment from a
