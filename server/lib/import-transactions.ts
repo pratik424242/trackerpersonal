@@ -15,7 +15,7 @@ const UNRECOGNIZED_LABEL = "LedgerUnrecognized";
 
 // Card/account last-4-digits -> the `accounts.name` row this app already has.
 const LAST4_TO_ACCOUNT: Record<string, string> = {
-  "0702": "Bank",
+  "0702": "HDFC Bank",
   "2149": "HDFC",
   "9008": "ICICI",
   // 1003 is an add-on card on the same ICICI account — same underlying

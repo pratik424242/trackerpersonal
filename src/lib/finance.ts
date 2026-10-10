@@ -16,12 +16,7 @@ export type Category = {
 };
 
 export type TransactionKind =
-  | "expense"
-  | "salary"
-  | "card_payment"
-  | "lent"
-  | "repayment"
-  | "investment";
+  "expense" | "salary" | "card_payment" | "lent" | "repayment" | "investment" | "transfer";
 
 // Settlement kinds: money moved on behalf of another person. Neither is
 // personal spending nor income, so analytics must exclude both.
@@ -33,6 +28,10 @@ export const isSettlement = (kind: string): kind is TransactionKind =>
 // your own assets — not consumption — so spending analytics exclude it just
 // like settlements, while account balances still move like an expense.
 export const isInvestment = (kind: string): kind is TransactionKind => kind === "investment";
+
+// Money relocated between two of your own bank accounts. Neither spending
+// nor income — analytics exclude it, exactly like card_payment.
+export const isTransfer = (kind: string): kind is TransactionKind => kind === "transfer";
 
 export type Transaction = {
   id: string;
@@ -297,7 +296,9 @@ export async function editTransaction(
 // both sitting in the ledger forever. Deletes both originals and, unless
 // they cancel out exactly, applies one new entry for the net amount under
 // the resulting sign's kind. card_payment is excluded: it already touches
-// two accounts at once. Settlements (lent/repayment) are excluded too:
+// two accounts at once. Transfers are excluded for the same reason: netting
+// one against income would silently rewrite a relocation into ordinary cash
+// flow. Settlements (lent/repayment) are excluded too:
 // they're already neutral pairs with their own receivable history, and
 // collapsing them would erase who-owes-what. Investments are excluded for
 // the same reason: netting one against income would silently rewrite a
@@ -316,9 +317,11 @@ export async function netTransactions(
     isSettlement(a.kind) ||
     isSettlement(b.kind) ||
     isInvestment(a.kind) ||
-    isInvestment(b.kind)
+    isInvestment(b.kind) ||
+    isTransfer(a.kind) ||
+    isTransfer(b.kind)
   ) {
-    throw new Error("Card payments, settlements and investments can't be netted");
+    throw new Error("Card payments, transfers, settlements and investments can't be netted");
   }
 
   const signed = (t: Transaction) => (t.kind === "salary" ? Number(t.amount) : -Number(t.amount));

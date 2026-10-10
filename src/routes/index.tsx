@@ -31,6 +31,7 @@ import {
   isoToDateInput,
   isInvestment,
   isSettlement,
+  isTransfer,
   knownPeople,
   netTransactions,
   receivablesByPerson,
@@ -613,13 +614,15 @@ function Journal() {
                 ? (catName ?? "Salary")
                 : t.kind === "card_payment"
                   ? `Payment → ${t.linked_account_id ? accountsById[t.linked_account_id]?.name : "Card"}`
-                  : t.kind === "lent"
-                    ? `Lent · ${t.person ?? "?"}`
-                    : t.kind === "repayment"
-                      ? `${t.person ?? "?"} repaid`
-                      : t.kind === "investment"
-                        ? "Investment"
-                        : (catName ?? "Uncategorized");
+                  : t.kind === "transfer"
+                    ? `Transfer → ${t.linked_account_id ? accountsById[t.linked_account_id]?.name : "Account"}`
+                    : t.kind === "lent"
+                      ? `Lent · ${t.person ?? "?"}`
+                      : t.kind === "repayment"
+                        ? `${t.person ?? "?"} repaid`
+                        : t.kind === "investment"
+                          ? "Investment"
+                          : (catName ?? "Uncategorized");
             return (
               <li
                 key={t.id}
@@ -692,7 +695,8 @@ function Journal() {
           onNet={
             editingTxn.kind === "card_payment" ||
             isSettlement(editingTxn.kind) ||
-            isInvestment(editingTxn.kind)
+            isInvestment(editingTxn.kind) ||
+            isTransfer(editingTxn.kind)
               ? undefined
               : () => {
                   setNettingTxn(editingTxn);
@@ -712,7 +716,8 @@ function Journal() {
               t.id !== nettingTxn.id &&
               t.kind !== "card_payment" &&
               !isSettlement(t.kind) &&
-              !isInvestment(t.kind),
+              !isInvestment(t.kind) &&
+              !isTransfer(t.kind),
           )}
           categories={categories}
           onClose={() => setNettingTxn(null)}
@@ -757,19 +762,23 @@ function EditTransactionModal({
   // Kind is editable so mistakes and auto-imports can be corrected in place:
   // an expense that was actually for someone else converts to a lent entry,
   // an auto-imported credit that was actually someone repaying converts to a
-  // repayment — without delete-and-re-enter. card_payment stays fixed.
+  // repayment — without delete-and-re-enter. card_payment and transfer stay
+  // fixed: their double-entry has no single-kind twin.
   const [kind, setKind] = useState<TransactionKind>(txn.kind);
   const isCardPayment = kind === "card_payment";
+  const isTransfer = kind === "transfer";
+  const isFixed = isCardPayment || isTransfer;
   const isSettle = isSettlement(kind);
   const changedKind = kind !== txn.kind;
 
-  // Salary/repayment/card-payment sources must be bank accounts (the RPC
-  // enforces this); expense/lent can come from any account.
+  // Salary/repayment/card-payment/transfer sources must be bank accounts
+  // (the RPC enforces this); expense/lent can come from any account.
   const sourceAccounts =
-    isCardPayment || kind === "salary" || kind === "repayment"
+    isFixed || kind === "salary" || kind === "repayment"
       ? accounts.filter((a) => a.kind === "bank")
       : accounts;
   const cardAccounts = accounts.filter((a) => a.kind === "credit_card");
+  const destBanks = accounts.filter((a) => a.kind === "bank" && a.id !== accountId);
 
   const [amount, setAmount] = useState(String(Number(txn.amount)));
   const [categoryId, setCategoryId] = useState(txn.category_id);
@@ -786,13 +795,20 @@ function EditTransactionModal({
     const src = accounts.find((a) => a.id === accountId);
     if (!src) return;
     if (
-      (kind === "salary" || kind === "repayment" || kind === "card_payment") &&
+      (kind === "salary" || kind === "repayment" || isFixed) &&
       src.kind !== "bank" &&
       accounts.some((a) => a.kind === "bank")
     ) {
       setAccountId(accounts.find((a) => a.kind === "bank")!.id);
     }
-  }, [kind, accountId, accounts]);
+  }, [kind, accountId, accounts, isFixed]);
+
+  // A transfer's destination must differ from its source.
+  useEffect(() => {
+    if (isTransfer && linkedAccountId === accountId && destBanks.length > 0) {
+      setLinkedAccountId(destBanks[0].id);
+    }
+  }, [isTransfer, linkedAccountId, accountId, destBanks]);
 
   function save() {
     const n = Number(amount);
@@ -800,12 +816,14 @@ function EditTransactionModal({
     if (kind === "expense" && !categoryId) return toast.error("Pick a category");
     if (isSettle && !person.trim()) return toast.error("Who is it?");
     if (isCardPayment && !linkedAccountId) return toast.error("Pick a card");
+    if (isTransfer && (!linkedAccountId || linkedAccountId === accountId))
+      return toast.error("Pick a destination account");
     onSave({
       amount: n,
       kind,
       category_id: kind === "expense" ? categoryId : null,
       account_id: accountId,
-      linked_account_id: isCardPayment ? linkedAccountId : null,
+      linked_account_id: isFixed ? linkedAccountId : null,
       note: note.trim() || null,
       person: isSettle ? person.trim() : null,
       occurred_at: dateInputToISO(dateStr, new Date(txn.occurred_at)),
@@ -823,7 +841,9 @@ function EditTransactionModal({
             ? "Edit repayment"
             : kind === "investment"
               ? "Edit investment"
-              : "Edit card payment";
+              : kind === "transfer"
+                ? "Edit transfer"
+                : "Edit card payment";
 
   return (
     <div
@@ -859,35 +879,33 @@ function EditTransactionModal({
 
         {/* A genuine imported card_payment stays fixed; one just converted
             here (from an expense) keeps the switcher so a misclick can
-            still be backed out before saving. */}
-        {!(txn.kind === "card_payment") && (
+            still be backed out before saving. Transfers stay fixed too. */}
+        {!(txn.kind === "card_payment" || txn.kind === "transfer") && (
           <div className="mb-4 flex flex-wrap justify-center gap-1">
-            {([kind, ...KIND_SWITCH_TO[kind as keyof typeof KIND_SWITCH_TO]] as const).map(
-              (k) => {
-                const meta = KIND_SWITCH_META[k as keyof typeof KIND_SWITCH_META];
-                const Icon = meta.icon;
-                const current = k === kind;
-                return current ? (
-                  <span
-                    key={k}
-                    aria-current="true"
-                    className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[11px] border bg-foreground text-background border-foreground"
-                  >
-                    <Icon className="size-3" />
-                    {meta.label}
-                  </span>
-                ) : (
-                  <button
-                    key={k}
-                    onClick={() => setKind(k as TransactionKind)}
-                    className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[11px] border border-border text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-colors"
-                  >
-                    <Icon className="size-3" />
-                    {meta.label}
-                  </button>
-                );
-              },
-            )}
+            {([kind, ...KIND_SWITCH_TO[kind as keyof typeof KIND_SWITCH_TO]] as const).map((k) => {
+              const meta = KIND_SWITCH_META[k as keyof typeof KIND_SWITCH_META];
+              const Icon = meta.icon;
+              const current = k === kind;
+              return current ? (
+                <span
+                  key={k}
+                  aria-current="true"
+                  className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[11px] border bg-foreground text-background border-foreground"
+                >
+                  <Icon className="size-3" />
+                  {meta.label}
+                </span>
+              ) : (
+                <button
+                  key={k}
+                  onClick={() => setKind(k as TransactionKind)}
+                  className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[11px] border border-border text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-colors"
+                >
+                  <Icon className="size-3" />
+                  {meta.label}
+                </button>
+              );
+            })}
           </div>
         )}
 
@@ -896,6 +914,21 @@ function EditTransactionModal({
             <p className="text-xs text-muted-foreground mb-2">Paying which card?</p>
             <div className="flex flex-wrap gap-2 mb-4">
               {cardAccounts.map((a) => (
+                <Chip
+                  key={a.id}
+                  active={linkedAccountId === a.id}
+                  onClick={() => setLinkedAccountId(a.id)}
+                >
+                  {a.name}
+                </Chip>
+              ))}
+            </div>
+          </div>
+        ) : isTransfer ? (
+          <div className="mb-1">
+            <p className="text-xs text-muted-foreground mb-2">To which account?</p>
+            <div className="flex flex-wrap gap-2 mb-4">
+              {destBanks.map((a) => (
                 <Chip
                   key={a.id}
                   active={linkedAccountId === a.id}

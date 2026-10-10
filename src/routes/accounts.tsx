@@ -31,11 +31,12 @@ function AccountsPage() {
   const { data: accounts = [] } = useQuery(accountsQuery);
   const { data: settlements = [] } = useQuery(receivablesQuery);
 
-  const bank = accounts.find((a) => a.kind === "bank");
+  const banks = accounts.filter((a) => a.kind === "bank");
   const cards = accounts.filter((a) => a.kind === "credit_card");
+  const bankTotal = banks.reduce((s, b) => s + b.balance, 0);
   const debt = cards.reduce((s, c) => s + c.balance, 0);
   const owed = totalOutstanding(settlements);
-  const netWorth = (bank?.balance ?? 0) - debt + owed;
+  const netWorth = bankTotal - debt + owed;
 
   return (
     <div className="space-y-6 md:space-y-10">
@@ -47,29 +48,62 @@ function AccountsPage() {
           {formatINR(netWorth)}
         </p>
         <p className="mt-2 text-xs md:text-sm text-muted-foreground tnum">
-          {formatINR(bank?.balance ?? 0)} in bank · {formatINR(debt)} owed on cards
+          {formatINR(bankTotal)} across {banks.length} bank account{banks.length === 1 ? "" : "s"} ·{" "}
+          {formatINR(debt)} owed on cards
           {owed > 0 && <> · {formatINR(owed)} owed by others</>}
         </p>
       </section>
 
-      <section className="space-y-3">
-        {accounts.map((a) => (
-          <AccountCard key={a.id} account={a} bank={bank ?? null} />
-        ))}
-      </section>
+      {banks.length > 0 && (
+        <section>
+          <div className="flex items-baseline justify-between mb-3">
+            <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
+              Bank accounts
+            </h2>
+            <span className="tnum text-xs text-muted-foreground">{formatINR(bankTotal)}</span>
+          </div>
+          <div className="space-y-3">
+            {banks.map((a) => (
+              <AccountCard key={a.id} account={a} banks={banks} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {cards.length > 0 && (
+        <section>
+          <div className="flex items-baseline justify-between mb-3">
+            <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
+              Credit cards
+            </h2>
+            <span className="tnum text-xs text-muted-foreground">{formatINR(debt)} owed</span>
+          </div>
+          <div className="space-y-3">
+            {cards.map((a) => (
+              <AccountCard key={a.id} account={a} banks={banks} />
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }
 
-function AccountCard({ account, bank }: { account: Account; bank: Account | null }) {
+function AccountCard({ account, banks }: { account: Account; banks: Account[] }) {
   const qc = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(String(account.balance));
-  const [modal, setModal] = useState<null | "salary" | "clear">(null);
+  const [modal, setModal] = useState<null | "salary" | "clear" | "transfer">(null);
   const [amount, setAmount] = useState("");
+  const [otherId, setOtherId] = useState<string | null>(null);
 
   const isCard = account.kind === "credit_card";
   const label = isCard ? "Outstanding" : "Balance";
+  // The counterparty for clear/transfer: every bank except this card. Salary
+  // always credits the card it's opened on.
+  const counterparties = banks.filter((b) => b.id !== account.id);
+  const activeOtherId = otherId ?? counterparties[0]?.id ?? null;
+  const activeOther = banks.find((b) => b.id === activeOtherId) ?? null;
 
   const saveMut = useMutation({
     mutationFn: () => setAccountBalance(account.id, Number(value) || 0),
@@ -85,16 +119,31 @@ function AccountCard({ account, bank }: { account: Account; bank: Account | null
     mutationFn: async () => {
       const n = Number(amount);
       if (!n || n <= 0) throw new Error("Enter an amount");
-      if (modal === "salary" && bank) {
-        await applyTransaction({ amount: n, kind: "salary", account_id: bank.id, note: "Salary" });
-      } else if (modal === "clear" && bank) {
+      if (modal === "salary") {
+        await applyTransaction({
+          amount: n,
+          kind: "salary",
+          account_id: account.id,
+          note: "Salary",
+        });
+      } else if (modal === "clear" && activeOther) {
         await applyTransaction({
           amount: n,
           kind: "card_payment",
-          account_id: bank.id,
+          account_id: activeOther.id,
           linked_account_id: account.id,
           note: `Cleared ${account.name}`,
         });
+      } else if (modal === "transfer" && activeOther) {
+        await applyTransaction({
+          amount: n,
+          kind: "transfer",
+          account_id: account.id,
+          linked_account_id: activeOther.id,
+          note: null,
+        });
+      } else {
+        throw new Error("Pick an account first");
       }
     },
     onSuccess: () => {
@@ -102,6 +151,7 @@ function AccountCard({ account, bank }: { account: Account; bank: Account | null
       qc.invalidateQueries({ queryKey: ["transactions"] });
       setModal(null);
       setAmount("");
+      setOtherId(null);
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -165,10 +215,18 @@ function AccountCard({ account, bank }: { account: Account; bank: Account | null
             Add salary
           </button>
         )}
+        {!isCard && counterparties.length > 0 && (
+          <button
+            onClick={() => setModal("transfer")}
+            className="flex-1 h-9 rounded-md border border-border text-sm text-muted-foreground hover:text-foreground hover:border-foreground/30"
+          >
+            Transfer
+          </button>
+        )}
         {isCard && (
           <button
             onClick={() => setModal("clear")}
-            disabled={!bank}
+            disabled={counterparties.length === 0}
             className="flex-1 h-9 rounded-md border border-border text-sm text-muted-foreground hover:text-foreground hover:border-foreground/30 disabled:opacity-50"
           >
             Clear bill
@@ -179,8 +237,29 @@ function AccountCard({ account, bank }: { account: Account; bank: Account | null
       {modal && (
         <div className="mt-4 rounded-lg border border-border p-4 bg-background/40">
           <p className="text-xs text-muted-foreground mb-3">
-            {modal === "salary" ? "Credit salary to Bank" : `Pay ${account.name} from Bank`}
+            {modal === "salary"
+              ? `Credit salary to ${account.name}`
+              : modal === "clear"
+                ? `Pay ${account.name} from ${activeOther?.name ?? "…"}`
+                : `Move money from ${account.name} to ${activeOther?.name ?? "…"}`}
           </p>
+          {(modal === "clear" || modal === "transfer") && counterparties.length > 1 && (
+            <div className="flex flex-wrap gap-2 mb-3">
+              {counterparties.map((b) => (
+                <button
+                  key={b.id}
+                  onClick={() => setOtherId(b.id)}
+                  className={`shrink-0 h-8 px-3 rounded-full text-xs border transition-colors ${
+                    activeOtherId === b.id
+                      ? "bg-foreground text-background border-foreground"
+                      : "border-border text-muted-foreground hover:text-foreground hover:border-foreground/30"
+                  }`}
+                >
+                  {b.name}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="flex items-center gap-2">
             <span className="text-muted-foreground text-sm">₹</span>
             <input
